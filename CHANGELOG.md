@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [k1] - 2026-11-05
+
+Ingestión durable, ventanas exactas y oráculo independiente.
+
 ### Added
 
 - Criterios mecánicos de K1 (§4.8, §7, D14, D19, D25): `make build` sin root ni red, ventanas iguales al oráculo sin fallas y con tardíos, recuperación tras `kill -9` y truncado del log, contabilidad por inquilino en saturación y reparto justo; `python3 scripts/run_criteria.py` (o `make criteria`) los corre en orden, trata 77 como omitido y falla si alguno falla.
@@ -12,12 +16,23 @@
 - Admisión y secuenciador de ingestión (§4.1, §4.3, §4.4, D03, D05): cuota por inquilino con token bucket y ráfaga, colas acotadas servidas con Deficit Round Robin ponderado, secuenciador único que asigna offsets, clasifica tardíos con el watermark por inquilino, escribe TICKs de inactividad y confirma cada lote solo tras el fsync del group commit (4 MiB o 2 ms); todo descarte se cuenta por inquilino y causa.
 - Modelo de eventos y parsers de ingestión (§4.1–§4.3): texto de exposición de Prometheus con timestamp obligatorio para métricas y NDJSON para logs, lote atómico que se rechaza entero (`invalid`, `too_large` por encima de 100 000 eventos), clave canónica de serie con escapes, hash FNV-1a de la identidad para los shards y codificación binaria del payload BATCH.
 - Log de entrada durable (§4.3): segmentos con CRC-32, rotación a 256 MiB, lectura desde una posición o un offset y recuperación que trunca el registro final roto; reloj, azar y disco inyectables, con un disco en memoria que simula caídas.
-- Fundación del proyecto: contrato con las decisiones de diseño, investigación con fuentes y versiones fijadas, límites declarados, comando de chequeo (`make check`) y CI que lo corre.
 
 ### Fixed
 
 - `CountDrop` creaba una segunda entrada de contadores para un inquilino configurado: `/metrics` repetía sus líneas y, al restaurar un checkpoint, esa entrada en cero borraba los contadores reales del inquilino.
 - Los perfiles `saturation` y `fairness` de `otgen` enviaban por una sola conexión por inquilino, que espera el fsync de cada lote: los acks, no la tasa, limitaban la carga, que podía quedar por debajo de la cuota. Ahora usan 8 conexiones por inquilino, de modo que `crit_accounting.py` y `crit_fairness.py` corren con el inquilino por encima de su cuota.
+
+### Decisions
+
+- Los perfiles con tasa de `otgen` envían por 8 conexiones por inquilino, para que la tasa, y no la espera de los acks, fije lo que ofrece cada uno.
+- `crit_accounting.py` y `crit_fairness.py` corren 10 s en lugar de los 30 s del perfil, para que el oráculo lea menos log.
+- Los criterios que arrancan el motor corren con `idle_grace_ms` en 0, porque sus timestamps sintéticos quedan muy por detrás del reloj.
+
+## [k0] - 2026-11-05
+
+### Added
+
+- Fundación del proyecto: contrato con las decisiones de diseño, investigación con fuentes y versiones fijadas, límites declarados, comando de chequeo (`make check`) y CI que lo corre.
 
 ### Decisions
 

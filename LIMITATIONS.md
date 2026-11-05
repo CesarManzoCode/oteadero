@@ -25,6 +25,14 @@ Fuente única de lo que el proyecto no demuestra. Ningún otro archivo repite es
 - "Una sola vez" es efectiva en el receptor, que deduplica por clave de idempotencia; la entrega es al menos una vez.
 - La cota de cardinalidad es estadística (HyperLogLog), no determinista como la de DDSketch.
 - La latencia de alerta se mide desde el tiempo de evento del instante de evaluación, que en esa corrida coincide con el reloj de pared al enviar.
+- El cierre de K1 conservó el veredicto de cada criterio, no su salida: no hay cifras publicadas de ventanas comparadas, tardíos, bytes truncados, eventos enviados o descartados, ni cocientes de reparto.
+- `crit_fairness.py` decide solo con t1, t2 y t3, y con los confirmados que reporta el generador, no con el motor ni con el log. No falla si t4 no supera su cuota ni si no llega a 5 veces esa cuota, así que su código de salida no prueba que hubo un inquilino ruidoso.
+- `crit_accounting.py` sale con 0 aunque la corrida no tenga ningún descarte, así que su código de salida no prueba que hubo saturación.
+- Los criterios de K1 con carga corren una sola semilla fija cada uno. `crit_recovery.py` inyecta una sola caída y un solo truncado por corrida.
+- `crit_accounting.py` y `crit_fairness.py` corren 10 s, no los 30 s que el generador usa por omisión en esos perfiles.
+- Los criterios de K1 que arrancan el motor corren con `idle_grace_ms` en 0, porque sus timestamps sintéticos quedan muy por detrás del reloj y un TICK cerraría todas las cubetas. El cierre por TICK solo está cubierto por tests unitarios del motor y del oráculo.
+- El oráculo trata como fin del log cualquier registro inválido, cabecera mala, otro id de log o hueco de offsets, y no lo reporta: no distingue un final roto de una corrupción intermedia.
+- El campo `late_generated` del reporte de `otgen` cuenta el retraso nominal, no los tardíos reales: separar métricas y logs en lotes distintos puede volver tardío un log cuyo retraso nominal era menor que L.
 
 ## Rendimiento
 
