@@ -2,3 +2,7 @@
 /AGENTS.md
 /CLAUDE.md
 /.claude/
+/bin/
+/.refbin/
+/.work/
+__pycache__/
