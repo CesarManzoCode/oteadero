@@ -9,6 +9,8 @@ Fuente única de lo que el proyecto no demuestra. Ningún otro archivo repite es
 - No hay almacenamiento histórico ni lenguaje de consultas: la persistencia es solo el log de entrada y los checkpoints.
 - Los descartes de inquilinos desconocidos se cuentan por id solo para los primeros 1024 ids distintos; los demás se suman juntos bajo `_other`.
 - Los descartes no están en el log: tras una caída, los ocurridos desde el último checkpoint se pierden de los contadores, igual que los lotes en cola sin confirmar. El balde de cuota arranca lleno tras cada reinicio.
+- Un cuerpo por encima de `max_body_bytes`, o cortado por el cliente, no se lee entero: sus descartes se cuentan por las líneas recibidas, no por las que el productor envió.
+- Nada impide arrancar dos `serve` sobre el mismo `data_dir` con puertos distintos; el log solo admite un escritor y esa corrida lo corrompería.
 - En los exports, una suma o tasa NaN o ±Inf se escribe con los tokens `NaN`, `Infinity` y `-Infinity`, que lee el módulo `json` de Python pero no son JSON estricto.
 - No hay trazas; solo métricas (contadores delta y gauges) y logs estructurados.
 - La interfaz es HTTP/1.1 con texto de Prometheus y NDJSON. No se implementa gRPC, remote write de Prometheus ni OTLP, y no se demuestra "millones de usuarios".

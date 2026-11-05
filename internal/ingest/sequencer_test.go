@@ -742,3 +742,33 @@ func TestConfig(t *testing.T) {
 		}
 	}
 }
+
+func TestWatermarkFollowsCommits(t *testing.T) {
+	f := newFixture(t, config(open("a")))
+	want := func(w int64, defined bool) {
+		t.Helper()
+		if got, ok := f.seq.Watermark("a"); got != w || ok != defined {
+			t.Fatalf("Watermark = %d, %v; want %d, %v", got, ok, w, defined)
+		}
+	}
+	want(0, false)
+	f.submit(metrics("a", t0+500, t0))
+	want(0, false) // not committed yet
+	f.flush()
+	want(t0+500-DefaultLatenessMs, true)
+
+	f.advance(6 * time.Second) // writes a TICK
+	tick := f.clk.NowMs()
+	f.flush()
+	want(tick-DefaultIdleGraceMs-DefaultLatenessMs, true)
+
+	g := newFixture(t, config(open("a")))
+	snap := g.seq.snapshot()
+	snap.Marks = []Mark{{Tenant: "a", MaxTs: t0}}
+	if err := g.seq.Restore(&snap); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := g.seq.Watermark("a"); !ok || got != t0-DefaultLatenessMs {
+		t.Fatalf("after Restore: %d, %v", got, ok)
+	}
+}

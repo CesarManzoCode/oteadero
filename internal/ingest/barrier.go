@@ -118,6 +118,9 @@ func (s *Sequencer) Restore(snap *Snapshot) error {
 	s.wm.restore(snap.Marks)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	for _, x := range snap.Marks {
+		s.delivered[x.Tenant] = x.MaxTs - s.wm.latenessMs
+	}
 	for _, st := range snap.Tenants {
 		if t := s.tenants[st.Tenant]; t != nil {
 			t.stats = st

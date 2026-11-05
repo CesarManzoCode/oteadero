@@ -84,6 +84,8 @@ type Sequencer struct {
 	active  []*tenant // DRR round: tenants with a non-empty queue
 	cur     int
 	closing bool
+	// delivered is each tenant's watermark as of what reached the sink.
+	delivered map[string]int64
 
 	// Owned by the Poll goroutine.
 	wm            *watermarks
@@ -117,6 +119,7 @@ func New(cfg Config, clk clock.Clock, log *wal.Log, sink Sink) (*Sequencer, erro
 		wake:        make(chan struct{}, 1),
 		tenants:     make(map[string]*tenant, len(cfg.Tenants)),
 		unknown:     map[string]*Stats{},
+		delivered:   map[string]int64{},
 		wm:          newWatermarks(cfg.BucketMs, cfg.LatenessMs, cfg.IdleGraceMs),
 	}
 	now := clk.Monotonic()
@@ -279,6 +282,13 @@ func (s *Sequencer) deliver(ds []delivery) {
 	for _, d := range ds {
 		if d.batch != nil {
 			d.stats.Late += uint64(d.batch.LateCount)
+			if n := len(d.batch.Watermark); n > 0 {
+				s.delivered[d.batch.Batch.Tenant] = d.batch.Watermark[n-1]
+			}
+		} else {
+			for _, adv := range d.tick.Advances {
+				s.delivered[adv.Tenant] = adv.Watermark
+			}
 		}
 	}
 	s.mu.Unlock()

@@ -215,6 +215,15 @@ func (s *Sequencer) Stats() []Stats {
 	return out
 }
 
+// Watermark returns the watermark W of a tenant as of the records already
+// committed; ok is false while it is not defined. Safe for concurrent use.
+func (s *Sequencer) Watermark(tenant string) (w int64, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	w, ok = s.delivered[tenant]
+	return w, ok
+}
+
 // pick removes the next batch in weighted deficit round robin order, or
 // returns nil when every queue is empty. A tenant's turn adds
 // weight·quantumEvents to its deficit and serves head batches while they

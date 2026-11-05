@@ -32,3 +32,9 @@ func TestIntNRange(t *testing.T) {
 		}
 	}
 }
+
+func TestNewFromOSSeedsDiffer(t *testing.T) {
+	if NewFromOS().Uint64() == NewFromOS().Uint64() {
+		t.Fatal("two generators started at the same value")
+	}
+}

@@ -23,6 +23,23 @@ var (
 	ErrTooLarge = errors.New("too_large")
 )
 
+// CountEvents returns how many lines of a body of kind k its parser would
+// read as events, valid or not: the size of a batch that is dropped before
+// or by the parser.
+func CountEvents(k Kind, body []byte) int {
+	n := 0
+	for len(body) > 0 {
+		var l []byte
+		l, body = nextLine(body)
+		l = trimLine(l)
+		if len(l) == 0 || (k == KindMetrics && l[0] == '#') {
+			continue
+		}
+		n++
+	}
+	return n
+}
+
 // Metric is one metric sample: canonical series key, value and event time.
 type Metric struct {
 	Key   string

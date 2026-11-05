@@ -148,3 +148,20 @@ func BenchmarkParseMetrics(b *testing.B) {
 	})
 	b.ReportMetric(float64(b.N)*lines/b.Elapsed().Seconds(), "lines/s")
 }
+
+func TestCountEvents(t *testing.T) {
+	for _, tc := range []struct {
+		kind Kind
+		body string
+		want int
+	}{
+		{KindMetrics, "", 0},
+		{KindMetrics, "# c\n\n  \r\n", 0},
+		{KindMetrics, "a 1 1\n# c\nbad\nlast", 3},
+		{KindLogs, "{}\n\n# not a comment\n", 2},
+	} {
+		if got := CountEvents(tc.kind, []byte(tc.body)); got != tc.want {
+			t.Errorf("CountEvents(%d, %q) = %d, want %d", tc.kind, tc.body, got, tc.want)
+		}
+	}
+}
