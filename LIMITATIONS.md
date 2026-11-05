@@ -47,6 +47,12 @@ Fuente única de lo que el proyecto no demuestra. Ningún otro archivo repite es
 - Los criterios de K1 que arrancan el motor corren con `idle_grace_ms` en 0, porque sus timestamps sintéticos quedan muy por detrás del reloj y un TICK cerraría todas las cubetas. El cierre por TICK solo está cubierto por tests unitarios del motor y del oráculo.
 - El oráculo trata como fin del log cualquier registro inválido, cabecera mala, otro id de log o hueco de offsets, y no lo reporta: no distingue un final roto de una corrupción intermedia.
 - El campo `late_generated` del reporte de `otgen` cuenta el retraso nominal, no los tardíos reales: separar métricas y logs en lotes distintos puede volver tardío un log cuyo retraso nominal era menor que L.
+- El cierre de K2 tampoco conservó la salida de los criterios, solo su veredicto. No hay cifras publicadas del error relativo máximo de cuantiles o cardinalidad, ni del p50, p99 o máximo de latencia de notificación, ni de cuántos `kill -9`, incidentes o transiciones hubo. Solo consta que cada cifra cumplía su cota (0.01, 5% y 8000 ms).
+- En las reglas `quantile` y `cardinality`, el oráculo decide la condición con el valor que exportó el motor, no con el exacto. Sus transiciones prueban la máquina de estados, no el lado del umbral en que cae el sketch. Ese valor solo se juzga contra la cota de error en `crit_quantiles_merged.py` y `crit_cardinality.py`.
+- Los criterios de K2 con carga corren una sola semilla fija cada uno. `crit_notify_once.py` es una sola corrida de 90 s, y `crit_alert_latency.py` mide la latencia sobre esa misma corrida, así que el p99 sale de una sola ejecución con fallas.
+- `crit_alert_latency.py` reutiliza la corrida que encuentre en `.work/notify_once/` y solo lanza una nueva si no hay ninguna: no comprueba que esa corrida sea del código actual.
+- `crit_keep_firing_for.py` construye las alertas esperadas con las que el motor tenía en `firing` en cada instante. Prueba que promtool y vmalert-tool aceptan ese resultado, no los estados `pending`.
+- El log del cierre de K2 no registra las versiones ni los SHA-256 de los binarios de referencia que corrieron. Las versiones fijadas son las que verifica `scripts/fetch_refs.py`.
 
 ## Rendimiento
 

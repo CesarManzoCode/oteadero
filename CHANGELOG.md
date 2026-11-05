@@ -1,6 +1,8 @@
 # Changelog
 
-## [Unreleased]
+## [k2] - 2026-11-05
+
+Cuantiles y cardinalidad con cota publicada, reglas de alerta, evaluador replicado con notificación única efectiva y comparación con promtool, vmalert y vmalert-tool.
 
 ### Added
 
@@ -18,6 +20,14 @@
 - El valor esperado de `TestIncidentIDIsFixed` se había calculado con `printf '...\0123000'`, donde `\0123` es un escape octal; el `incident_id` del motor ya era el de §4.7 y coincide con `hashlib.sha256` del oráculo.
 - `TestAuditKeepsTheObservedMaximum` y `TestSketchesSurviveCrashWithCheckpoint` enviaban timestamps más de 10 min adelante del reloj del test, y el lote se descartaba como `invalid` (§4.1); ahora el reloj del test avanza hasta esos eventos.
 - `crit_cardinality.py` imprimía `cardinalidades comparados` en lugar de `cardinalidades comparadas`; cada criterio de sketches pasa ahora su línea de conteo completa a `print_relative`.
+
+### Decisions
+
+- En las reglas `quantile` y `cardinality`, el oráculo decide la condición con el valor que exportó el motor, porque un sketch puede quedar al otro lado del umbral dentro de su error publicado; ese valor lo juzgan los criterios de sketches.
+- El checkpoint de `serve` guarda la época de arrendamiento y sube a la versión 3 de su formato, porque la limpieza de segmentos puede borrar el registro LEASE.
+- Una regla debe declarar `match`; `"match": {}` toma todas las series del inquilino.
+- `otrecv` responde 400 con estado `invalid` a una petición sin `Idempotency-Key`, sin época válida o con cuerpo que no es JSON, y la registra y la cuenta como las demás.
+- Los criterios de alertas con fallas corren `serve` con `idle_grace_ms` en 5000 y carga con el reloj de pared, para que los ticks cierren las cubetas al acabar la carga.
 
 ## [k1] - 2026-11-05
 
