@@ -249,8 +249,8 @@ func TestBucketEnd(t *testing.T) {
 		{0, 0}, {1, 1000}, {999, 1000}, {1000, 1000}, {1001, 2000},
 		{-1, 0}, {-1000, -1000}, {-1001, -1000},
 	} {
-		if got := bucketEnd(c.ts, 1000); got != c.want {
-			t.Errorf("bucketEnd(%d) = %d, want %d", c.ts, got, c.want)
+		if got := BucketEnd(c.ts, 1000); got != c.want {
+			t.Errorf("BucketEnd(%d) = %d, want %d", c.ts, got, c.want)
 		}
 	}
 }

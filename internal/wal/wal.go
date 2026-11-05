@@ -399,3 +399,14 @@ func (l *Log) Close() error {
 	}
 	return err
 }
+
+// Segments returns the first offsets of the segments in dir, ascending.
+func Segments(fsys vfs.FS, dir string) ([]uint64, error) {
+	return listSegments(fsys, dir)
+}
+
+// RemoveSegment removes the segment whose first offset is base. The removal
+// is durable after SyncDir on dir.
+func RemoveSegment(fsys vfs.FS, dir string, base uint64) error {
+	return fsys.Remove(filepath.Join(dir, segName(base)))
+}

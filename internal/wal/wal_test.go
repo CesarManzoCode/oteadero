@@ -597,3 +597,36 @@ func (f *faultFS) OpenAppend(name string) (vfs.File, error) {
 	}
 	return &faultFile{File: file, fs: f}, nil
 }
+
+func TestSegmentsAndRemoveSegment(t *testing.T) {
+	fsys := vfs.NewMem()
+	l, _, err := Open(fsys, dir, rng.New(1), Options{SegmentBytes: 128})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 8 {
+		if _, err := l.AppendBatch(batchPayload("a", 1, make([]byte, 64)), 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := l.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	bases, err := Segments(fsys, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bases) < 2 || bases[0] != 0 {
+		t.Fatalf("segments = %v", bases)
+	}
+	if err := RemoveSegment(fsys, dir, bases[0]); err != nil {
+		t.Fatal(err)
+	}
+	after, err := Segments(fsys, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(after, bases[1:]) {
+		t.Fatalf("segments = %v, want %v", after, bases[1:])
+	}
+}

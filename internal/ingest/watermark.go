@@ -30,8 +30,9 @@ func newWatermarks(bucketMs, latenessMs, idleGraceMs int64) *watermarks {
 	}
 }
 
-// bucketEnd returns ceil(ts / s) · s.
-func bucketEnd(ts, s int64) int64 {
+// BucketEnd returns ceil(ts / s) · s, the end of the bucket (end − s, end]
+// that holds ts.
+func BucketEnd(ts, s int64) int64 {
 	q := ts / s
 	if ts%s > 0 {
 		q++
@@ -61,7 +62,7 @@ func (w *watermarks) apply(b *event.Batch) (late []bool, wm []int64, nLate int) 
 			w.byTenant[b.Tenant] = m
 			w.order = append(w.order, m)
 		} else {
-			if bucketEnd(ts, w.bucketMs) <= m.maxTs-w.latenessMs {
+			if BucketEnd(ts, w.bucketMs) <= m.maxTs-w.latenessMs {
 				late[i] = true
 				nLate++
 			}
@@ -84,6 +85,26 @@ func (w *watermarks) tick(tsMs int64) []WatermarkAdvance {
 		}
 	}
 	return adv
+}
+
+// marks returns the tenants with a defined watermark, in first-event order.
+func (w *watermarks) marks() []Mark {
+	out := make([]Mark, len(w.order))
+	for i, m := range w.order {
+		out[i] = Mark{Tenant: m.tenant, MaxTs: m.maxTs}
+	}
+	return out
+}
+
+// restore replaces the state with marks, given in first-event order.
+func (w *watermarks) restore(marks []Mark) {
+	w.byTenant = make(map[string]*mark, len(marks))
+	w.order = w.order[:0]
+	for _, x := range marks {
+		m := &mark{tenant: x.Tenant, maxTs: x.MaxTs}
+		w.byTenant[x.Tenant] = m
+		w.order = append(w.order, m)
+	}
 }
 
 // minMaxTs returns the smallest maxTs among tenants with a defined

@@ -57,6 +57,7 @@ type Sink interface {
 
 type delivery struct {
 	e     *entry
+	stats *Stats
 	batch *CommittedBatch
 	tick  *TickEffect
 }
@@ -92,6 +93,11 @@ type Sequencer struct {
 	firstUnsynced time.Duration
 	nextTick      time.Duration
 	err           error
+	ckpt          Checkpointer
+	ckptEvery     time.Duration
+	ckptEvents    uint64
+	ckptAt        time.Duration
+	ckptNext      uint64
 }
 
 // New returns a sequencer that appends to log, which must be open and
@@ -185,6 +191,9 @@ func (s *Sequencer) Poll() error {
 			return s.fail(err)
 		}
 	}
+	if s.checkpointDue() {
+		return s.Barrier()
+	}
 	return nil
 }
 
@@ -202,16 +211,28 @@ func (s *Sequencer) write(e *entry) error {
 	if err != nil {
 		return err
 	}
-	late, wm, nLate := s.wm.apply(e.b)
 	s.markUnsynced()
-	s.pending = append(s.pending, delivery{e: e, batch: &CommittedBatch{
-		Batch:       e.b,
+	s.pending = append(s.pending, delivery{e: e, stats: &e.t.stats, batch: s.classify(e.b, first)})
+	return nil
+}
+
+// classify applies the §4.4 rules to b, whose first event has offset first.
+// Live writes and recovery replay both go through it.
+func (s *Sequencer) classify(b *event.Batch, first uint64) *CommittedBatch {
+	late, wm, nLate := s.wm.apply(b)
+	return &CommittedBatch{
+		Batch:       b,
 		FirstOffset: first,
 		Late:        late,
 		Watermark:   wm,
 		LateCount:   nLate,
-	}})
-	return nil
+	}
+}
+
+// applyTick applies a TICK at server time tsMs, followed by the event with
+// offset next. Live writes and recovery replay both go through it.
+func (s *Sequencer) applyTick(tsMs int64, next uint64) *TickEffect {
+	return &TickEffect{TsMs: tsMs, NextOffset: next, Advances: s.wm.tick(tsMs)}
 }
 
 // maybeTick appends a TICK when some tenant with a defined watermark has
@@ -232,10 +253,9 @@ func (s *Sequencer) maybeTick() error {
 	if err := s.log.AppendTick(nowMs); err != nil {
 		return err
 	}
-	adv := s.wm.tick(nowMs)
 	s.nextTick = now + tickInterval
 	s.markUnsynced()
-	s.pending = append(s.pending, delivery{tick: &TickEffect{TsMs: nowMs, NextOffset: s.log.NextOffset(), Advances: adv}})
+	s.pending = append(s.pending, delivery{tick: s.applyTick(nowMs, s.log.NextOffset())})
 	return nil
 }
 
@@ -248,10 +268,17 @@ func (s *Sequencer) commit() error {
 	ds := s.pending
 	s.pending = nil
 	s.unsynced = false
+	s.deliver(ds)
+	return nil
+}
+
+// deliver counts the late events of ds, acks the producers of those that
+// have one (replayed records have none) and hands ds to the sink, in order.
+func (s *Sequencer) deliver(ds []delivery) {
 	s.mu.Lock()
 	for _, d := range ds {
 		if d.batch != nil {
-			d.e.t.stats.Late += uint64(d.batch.LateCount)
+			d.stats.Late += uint64(d.batch.LateCount)
 		}
 	}
 	s.mu.Unlock()
@@ -267,7 +294,6 @@ func (s *Sequencer) commit() error {
 			s.sink.Tick(d.tick)
 		}
 	}
-	return nil
 }
 
 // fail stops the sequencer after a log error: admission closes and every
@@ -303,8 +329,8 @@ func (s *Sequencer) fail(err error) error {
 
 // NextWake reports how long from now Poll has work without new input: 0
 // while batches are queued, otherwise the earliest of the group commit
-// deadline and the next TICK. ok is false when only new input or Shutdown
-// can create work.
+// deadline, the next TICK and the next checkpoint. ok is false when only
+// new input or Shutdown can create work.
 func (s *Sequencer) NextWake() (d time.Duration, ok bool) {
 	if s.err != nil {
 		return 0, false
@@ -326,6 +352,12 @@ func (s *Sequencer) NextWake() (d time.Duration, ok bool) {
 			if !ok || t < d {
 				d, ok = t, true
 			}
+		}
+	}
+	if s.ckpt != nil && !closing {
+		t := max(s.ckptAt+s.ckptEvery-now, 0)
+		if !ok || t < d {
+			d, ok = t, true
 		}
 	}
 	return d, ok

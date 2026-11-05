@@ -8,6 +8,8 @@ Fuente única de lo que el proyecto no demuestra. Ningún otro archivo repite es
 - El proceso de ingestión (`serve`) no está replicado: si cae, no se ingiere ni se renuevan arrendamientos hasta que vuelve.
 - No hay almacenamiento histórico ni lenguaje de consultas: la persistencia es solo el log de entrada y los checkpoints.
 - Los descartes de inquilinos desconocidos se cuentan por id solo para los primeros 1024 ids distintos; los demás se suman juntos bajo `_other`.
+- Los descartes no están en el log: tras una caída, los ocurridos desde el último checkpoint se pierden de los contadores, igual que los lotes en cola sin confirmar. El balde de cuota arranca lleno tras cada reinicio.
+- En los exports, una suma o tasa NaN o ±Inf se escribe con los tokens `NaN`, `Infinity` y `-Infinity`, que lee el módulo `json` de Python pero no son JSON estricto.
 - No hay trazas; solo métricas (contadores delta y gauges) y logs estructurados.
 - La interfaz es HTTP/1.1 con texto de Prometheus y NDJSON. No se implementa gRPC, remote write de Prometheus ni OTLP, y no se demuestra "millones de usuarios".
 - No se demuestran Terraform, Ansible, infraestructura inmutable, el borde TypeScript/GraphQL ni operar ClickHouse o VictoriaMetrics a escala; estos dos solo se usan como referencia.
