@@ -32,6 +32,7 @@ _MAX_SHOWN = 20
 
 _RECOVERED = re.compile(r"recovered next_offset=(\d+) truncated_bytes=(\d+)")
 _LISTENING = re.compile(r"^listening ", re.MULTILINE)
+_ROLE = re.compile(r"^(leader epoch=\d+|follower)$", re.MULTILINE)
 _ACCOUNTING_LINE = re.compile(
     r"^oteadero_events_(accepted|dropped)_total\{(.*)\} (\d+)$", re.MULTILINE
 )
@@ -258,6 +259,14 @@ class Evaluator:
             self.work / f"{self.id}-{self.starts}.out",
         )
 
+    def leading(self):
+        """Return whether this evaluator runs and the last role it printed is leader."""
+        if self.proc is None or self.proc.poll() is not None:
+            return False
+        output = self.work / f"{self.id}-{self.starts}.out"
+        roles = _ROLE.findall(output.read_text(errors="replace"))
+        return bool(roles) and roles[-1] != "follower"
+
     def checkpoint_offsets(self):
         """Return the offsets of the checkpoints on disk, oldest first."""
         return sorted(int(path.stem) for path in self.ckpt_dir.glob("*.ckpt"))
@@ -285,7 +294,7 @@ class Evaluator:
             raise RuntimeError(f"evaluator {self.id} exited with {code}")
 
 
-def start_otgen(profile, seed, url, report, duration_s=None):
+def start_otgen(profile, seed, url, report, duration_s=None, realtime=False):
     command = [
         binary("otgen"),
         "--profile",
@@ -299,6 +308,8 @@ def start_otgen(profile, seed, url, report, duration_s=None):
     ]
     if duration_s is not None:
         command += ["--duration-s", str(duration_s)]
+    if realtime:
+        command.append("--realtime")
     return subprocess.Popen(command)
 
 
@@ -425,7 +436,7 @@ def run_exact(data_dir, out, rules=None):
     return read_jsonl(out / "exact_buckets.jsonl"), windows
 
 
-def run_oracle_rules(data_dir, out, rules, engine_evals):
+def run_oracle_rules(data_dir, out, rules, engine_evals, idle_grace_ms=0):
     """Replay the rules with the oracle and return its transitions.
 
     engine_evals is the evals.jsonl whose values decide quantile and cardinality.
@@ -438,7 +449,7 @@ def run_oracle_rules(data_dir, out, rules, engine_evals):
             "--data",
             data_dir,
             "--idle-grace-ms",
-            "0",
+            str(idle_grace_ms),
             "--rules",
             rules,
             "--engine-evals",
@@ -449,6 +460,23 @@ def run_oracle_rules(data_dir, out, rules, engine_evals):
         check=True,
     )
     return read_jsonl(Path(out) / "transitions.jsonl")
+
+
+def run_oracle_incidents(transitions, out):
+    """Return the notifications the oracle expects from a transitions.jsonl."""
+    subprocess.run(
+        [
+            sys.executable,
+            REPO_ROOT / "oracle" / "cli.py",
+            "incidents",
+            "--transitions",
+            transitions,
+            "--out",
+            out,
+        ],
+        check=True,
+    )
+    return read_jsonl(Path(out) / "incidents.jsonl")
 
 
 def write_jsonl(path, rows):
@@ -704,3 +732,62 @@ def check_transitions(export_dir, evaluator_id, oracle_rows, truncate_offset=0):
     print(f"transiciones comparadas: {compared}")
     print(f"transiciones: {len(diffs)} diferencias")
     return compared > 0 and not diffs
+
+
+class NotifyOutcome(NamedTuple):
+    incidents: int  # distinct (rule, group, T_f) expected
+    lost: list  # expected notifications without an accepted request
+    duplicates: list  # expected notifications with more than one accepted request
+    unknown: list  # accepted requests the oracle does not expect
+
+
+def notify_outcome(expected, requests):
+    """Check the receiver log against the notifications the oracle expects (section 4.7).
+
+    expected are the rows of the oracle incidents; requests the lines of the
+    receiver. A (rule, group) has one transition per T, so (rule, group, kind, t)
+    of the body names one notification of one incident (rule, group, T_f, kind)
+    whatever key it came with: two accepted requests of it are an effective
+    duplicate even with two different keys. Only accepted requests count.
+    """
+    counts = {}
+    names = {}
+    for row in expected:
+        event = (row["rule"], row["group"], row["kind"], row["t"])
+        counts[event] = 0
+        names[event] = row["key"]
+    unknown = []
+    for request in requests:
+        if request["status"] != "accepted":
+            continue
+        body = request["body"]
+        event = None
+        if isinstance(body, dict):
+            event = (body.get("rule"), body.get("group"), body.get("kind"), body.get("t"))
+        if event in counts:
+            counts[event] += 1
+        else:
+            unknown.append(request["key"])
+    return NotifyOutcome(
+        incidents=len({row["incident"] for row in expected}),
+        lost=[names[e] for e, n in counts.items() if n == 0],
+        duplicates=[names[e] for e, n in counts.items() if n > 1],
+        unknown=unknown,
+    )
+
+
+def notification_latencies(requests):
+    """Return recv_ms - t of each accepted request, in ms (D25)."""
+    return [
+        request["recv_ms"] - request["body"]["t"]
+        for request in requests
+        if request["status"] == "accepted"
+    ]
+
+
+def percentile(values, q):
+    """Return the nearest-rank q-quantile: the ceil(q n)-th smallest value."""
+    if not values:
+        raise ValueError("percentile of nothing")
+    ordered = sorted(values)
+    return ordered[max(0, math.ceil(q * len(ordered)) - 1)]

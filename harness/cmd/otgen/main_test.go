@@ -303,6 +303,41 @@ func TestAlertsLoad(t *testing.T) {
 	}
 }
 
+func TestAlertsRealtime(t *testing.T) {
+	p, err := lookupProfile("alerts", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p = realtimeProfile(p)
+	plan := p.tenants[0]
+	if plan.rate != alertsEventsPerS || plan.events != alertsEventsPerS*alertsRealtimeSeconds ||
+		plan.stepEvents != alertsEventsPerS || !p.scenario {
+		t.Fatalf("alerts realtime: %+v", p)
+	}
+	if b, _ := lookupProfile("basic", 0); realtimeProfile(b).tenants[0] != b.tenants[0] {
+		t.Error("realtime changed the basic profile")
+	}
+	before := time.Now().UnixMilli()
+	g := newGenerator(p, 0, 3, true)
+	var maxTs int64
+	for _, b := range g.cycle() {
+		if b.logs {
+			continue
+		}
+		parsed, err := event.ParseMetrics(nil, b.body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range parsed {
+			maxTs = max(maxTs, m.TsMs)
+		}
+	}
+	// Undelayed events carry the clock itself, not the start of its second.
+	if maxTs < before || maxTs > time.Now().UnixMilli() {
+		t.Errorf("max ts %d, clock from %d", maxTs, before)
+	}
+}
+
 // TestPacedProfilesDoNotWaitForAcks holds every answer until 8 batches of one
 // tenant arrived: with fewer connections the first ones never get their ack.
 func TestPacedProfilesDoNotWaitForAcks(t *testing.T) {
@@ -520,7 +555,6 @@ func TestRunRejectsBadUsage(t *testing.T) {
 		{"--profile", "basic", "--seed", "1", "--report", report, "--sink", "disk"},
 		{"--profile", "nope", "--seed", "1", "--report", report, "--sink", "null"},
 		{"--profile", "tail", "--seed", "1", "--report", report, "--sink", "null"},
-		{"--profile", "alerts", "--seed", "1", "--report", report, "--sink", "null", "--realtime"},
 		{"--profile", "alerts", "--seed", "1", "--report", report, "--sink", "null", "--duration-s", "5"},
 		{"--profile", "basic", "--seed", "1", "--report", report, "--sink", "null", "--duration-s", "5"},
 	} {

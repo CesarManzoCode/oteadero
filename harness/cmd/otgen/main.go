@@ -40,6 +40,9 @@ const (
 	alertsEventsPerS = 2000
 	alertsSeconds    = 600
 	alertsRate       = 150000
+	// alertsRealtimeSeconds is the length of the alerts load with --realtime,
+	// which sends one step per second of the clock.
+	alertsRealtimeSeconds = 90
 	// alertsInstances is the number of latency_ms and of errors series per
 	// service, and alertsStreams the number of log streams.
 	alertsInstances = 4
@@ -85,7 +88,7 @@ type profile struct {
 	delayed     bool
 	duration    time.Duration
 	// scenario replaces the random series of the mixed profiles with the
-	// services and phases of the alerts profile. It is synthetic only.
+	// services and phases of the alerts profile.
 	scenario bool
 }
 
@@ -172,6 +175,21 @@ func lookupProfile(name string, durationS float64) (profile, error) {
 		return profile{}, fmt.Errorf("profile %q is declared but not filled yet", name)
 	}
 	return profile{}, fmt.Errorf("unknown profile %q", name)
+}
+
+// realtimeProfile returns the parameters of a profile with --realtime. The
+// phases of the alerts profile advance one step per second of the clock, so
+// that its incidents come every few seconds of real time; the other profiles
+// do not change.
+func realtimeProfile(p profile) profile {
+	if !p.scenario {
+		return p
+	}
+	plan := p.tenants[0]
+	plan.rate = alertsEventsPerS
+	plan.events = alertsEventsPerS * alertsRealtimeSeconds
+	p.tenants = []tenantPlan{plan}
+	return p
 }
 
 // batch is one request body: all metrics or all logs of one tenant.
@@ -271,7 +289,11 @@ func (g *generator) cycle() []batch {
 	var now int64
 	if g.realtime {
 		now = time.Now().UnixMilli()
-		now -= now % g.p.stepMs
+		// The latency of an alert is measured from the ts of its events
+		// (D25), so the scenario keeps the clock as it is.
+		if !g.p.scenario {
+			now -= now % g.p.stepMs
+		}
 	}
 	metrics, logs := g.take(), g.take()
 	var nMetrics, nLogs int64
@@ -667,8 +689,8 @@ func run(args []string, stderr io.Writer) int {
 		return 2
 	}
 	p, err := lookupProfile(*name, *durationS)
-	if err == nil && p.scenario && *realtime {
-		err = fmt.Errorf("profile %q is synthetic only", *name)
+	if err == nil && *realtime {
+		p = realtimeProfile(p)
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "otgen: %v\n", err)
