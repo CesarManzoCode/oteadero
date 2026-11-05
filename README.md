@@ -21,7 +21,7 @@ make criteria   # todos los criterios mecánicos; 77 = omitido por falta de bina
 
 | Fase | Contenido | Estado |
 | --- | --- | --- |
-| K0 | Fundación: contrato, investigación, comando de chequeo | cerrada |
+| K0 | Fundación: contrato, investigación, comando de chequeo | terminada |
 | K1 | Ingestión durable, ventanas exactas y oráculo | pendiente |
 | K2 | Sketches, alertas, evaluador replicado y comparación con vmalert y Prometheus | pendiente |
 | K3 | Streams en vivo, simulación determinista, mutantes y rendimiento | pendiente |
