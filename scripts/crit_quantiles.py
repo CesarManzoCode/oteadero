@@ -22,7 +22,7 @@ def main():
         lib.exact_bucket_quantiles(exact_rows),
         lib.QUANTILE_ALPHA,
     )
-    return 0 if lib.print_relative("cuantiles", compared, worst, conflicts + diffs) else 1
+    return 0 if lib.print_relative("cuantiles comparados", compared, worst, conflicts + diffs) else 1
 
 
 if __name__ == "__main__":

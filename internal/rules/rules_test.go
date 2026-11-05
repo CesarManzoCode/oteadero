@@ -123,8 +123,8 @@ func TestLoad(t *testing.T) {
 }
 
 func TestIncidentIDIsFixed(t *testing.T) {
-	// printf 'cpu-high\0{svc="api"}\0123000' | sha256sum, first 32 characters.
-	const want = "ae11e8c08ee4dbe41e9a7e0ad5a8c248"
+	// printf 'cpu-high\000{svc="api"}\000123000' | sha256sum, first 32 characters.
+	const want = "d7d38cd1a21c25761dce51f4af79af51"
 	i := Incident{Rule: "cpu-high", Group: `{svc="api"}`, FiredAt: 123000}
 	if got := i.ID(); got != want {
 		t.Fatalf("ID = %s, want %s", got, want)

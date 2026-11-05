@@ -12,6 +12,13 @@
 - Reglas de alerta y su evaluación (§4.5–§4.7, D08, D22): carga y validación del JSON de reglas; ventanas `(T−R, T]` por regla y grupo sobre las cubetas cerradas, con conteo, suma, tasa, cuantil y cardinalidad; máquina de estados con `for`, `keep_firing_for` e histéresis; `incident_id` y claves de idempotencia, y estado serializable para el checkpoint. Aún sin proceso ni notificaciones.
 - Cuantiles y cardinalidad por cubeta (§4.8, §4.10, D07): las series de `quantile_metrics` llevan un DDSketch con error relativo publicado de 1% y las de logs un HyperLogLog por campo de `cardinality_fields`; `buckets.jsonl` añade `q` y `card` en esas series, los sketches entran en el checkpoint y 1 de cada 1000 cubetas con DDSketch guarda sus valores exactos para publicar el error observado en `oteadero_sketch_observed_rel_error_max`.
 
+### Fixed
+
+- Las cuatro reglas de logs de `rules/alerts.json` no tenían `match`, que el motor exige: `serve` y `evaluate` no arrancaban con ese archivo. Ahora llevan `"match": {}`, que toma todas las series del inquilino, igual que el oráculo cuando falta el campo.
+- El valor esperado de `TestIncidentIDIsFixed` se había calculado con `printf '...\0123000'`, donde `\0123` es un escape octal; el `incident_id` del motor ya era el de §4.7 y coincide con `hashlib.sha256` del oráculo.
+- `TestAuditKeepsTheObservedMaximum` y `TestSketchesSurviveCrashWithCheckpoint` enviaban timestamps más de 10 min adelante del reloj del test, y el lote se descartaba como `invalid` (§4.1); ahora el reloj del test avanza hasta esos eventos.
+- `crit_cardinality.py` imprimía `cardinalidades comparados` en lugar de `cardinalidades comparadas`; cada criterio de sketches pasa ahora su línea de conteo completa a `print_relative`.
+
 ## [k1] - 2026-11-05
 
 Ingestión durable, ventanas exactas y oráculo independiente.

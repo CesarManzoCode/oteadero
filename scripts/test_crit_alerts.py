@@ -1,3 +1,5 @@
+import contextlib
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -58,9 +60,15 @@ class QuantileComparisonTest(unittest.TestCase):
         self.assertEqual(lib.exact_bucket_quantiles(rows), {})
 
     def test_print_relative_fails_on_differences_and_on_nothing_compared(self):
-        self.assertTrue(lib.print_relative("cuantiles", 4, 0.009, []))
-        self.assertFalse(lib.print_relative("cuantiles", 4, 0.011, ["out of bound"]))
-        self.assertFalse(lib.print_relative("cuantiles", 0, 0.0, []))
+        self.assertTrue(lib.print_relative("cuantiles comparados", 4, 0.009, []))
+        self.assertFalse(lib.print_relative("cuantiles comparados", 4, 0.011, ["out of bound"]))
+        self.assertFalse(lib.print_relative("cuantiles comparados", 0, 0.0, []))
+
+    def test_print_relative_prints_the_count_line_as_given(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            lib.print_relative("cardinalidades comparadas", 3, 0.03, [])
+        self.assertEqual(out.getvalue(), "cardinalidades comparadas: 3\nerror relativo máximo: 0.03\n")
 
 
 class WindowComparisonTest(unittest.TestCase):

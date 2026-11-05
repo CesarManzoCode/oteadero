@@ -29,7 +29,7 @@ def main():
     )
     print(f"cubetas: {in_buckets}, evaluaciones: {in_rules}")
     ok = lib.print_relative(
-        "cardinalidades",
+        "cardinalidades comparadas",
         in_buckets + in_rules,
         max(worst_buckets, worst_rules),
         bucket_conflicts + eval_conflicts + bucket_diffs + rule_diffs,

@@ -708,10 +708,14 @@ def load_rules(path=ALERTS_RULES):
 
 
 def print_relative(label, compared, worst, diffs):
-    """Print the comparison of a sketch criterion and return whether it passes."""
+    """Print the comparison of a sketch criterion and return whether it passes.
+
+    label is the count line, with its participle agreeing in gender:
+    "cuantiles comparados", "cardinalidades comparadas".
+    """
     for line in diffs[:_MAX_SHOWN]:
         print(line)
-    print(f"{label} comparados: {compared}")
+    print(f"{label}: {compared}")
     print(f"error relativo máximo: {worst:.6g}")
     return compared > 0 and not diffs
 

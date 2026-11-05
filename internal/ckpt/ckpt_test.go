@@ -808,14 +808,16 @@ func TestExportSurvivesCrashWithCheckpoint(t *testing.T) {
 }
 
 func TestSketchesSurviveCrashWithCheckpoint(t *testing.T) {
+	// So many buckets close that some are audited, whichever the hash picks.
+	const closing = 20_000
 	mem := vfs.NewMem()
-	clk := clock.NewManual(base)
+	// The clock stands at the last event, which would otherwise be more than
+	// 10 min ahead of it and make its batch invalid (§4.1).
+	clk := clock.NewManual(base + closing*1000)
 	su := setup{fsys: mem, clk: clk, shards: 2, sketches: map[string]agg.SketchConfig{
 		"a": {QuantileMetrics: []string{"lat"}, CardinalityFields: []string{"user"}},
 	}}
 	n := start(t, su)
-	// So many buckets close that some are audited, whichever the hash picks.
-	const closing = 20_000
 	b := &event.Batch{Tenant: "a", Kind: event.KindMetrics}
 	for i := range closing {
 		b.Metrics = append(b.Metrics, event.Metric{Key: "lat{}", Value: 1.234, TsMs: base + int64(i)*1000})

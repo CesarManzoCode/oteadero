@@ -6,6 +6,7 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/CesarManzoCode/oteadero/internal/event"
 	"github.com/CesarManzoCode/oteadero/internal/sketch"
@@ -174,6 +175,9 @@ func TestAuditKeepsTheObservedMaximum(t *testing.T) {
 
 	end := findEnd("lat{}", true)
 	r2 := newRigConfig(t, Config{BucketMs: 1000, Sketches: testSketches}, 0)
+	// The audited bucket may lie more than 10 min ahead of base, which would
+	// make its batch invalid (§4.1): the clock goes to it first.
+	r2.clk.Advance(time.Duration(end-base) * time.Millisecond)
 	dd := sketch.NewDDSketch()
 	var batch []sample
 	values := []float64{0.1, 3.7, 12.5, 1000.25, -8, 0, math.Inf(1), 77}
