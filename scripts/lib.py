@@ -1,6 +1,7 @@
-"""What the criterion scripts share: binaries, serve, otgen, oracle and bucket comparison."""
+"""What the criterion scripts share: processes, otgen, oracle and export comparisons."""
 
 import json
+import math
 import os
 import re
 import shutil
@@ -22,6 +23,9 @@ SKIPPED = 77
 HIGH_QUOTA = 100_000_000
 
 _LISTEN_TIMEOUT_S = 60
+# How long an evaluator may take to read the rest of the log once the load
+# ended; its checkpoint interval (10 s by default) is part of it.
+_CATCH_UP_TIMEOUT_S = 120
 _STOP_TIMEOUT_S = 60
 _POLL_S = 0.01
 _MAX_SHOWN = 20
@@ -32,6 +36,13 @@ _ACCOUNTING_LINE = re.compile(
     r"^oteadero_events_(accepted|dropped)_total\{(.*)\} (\d+)$", re.MULTILINE
 )
 _TENANT_LABEL = re.compile(r'tenant="([^"]*)"')
+
+ALERTS_RULES = REPO_ROOT / "rules" / "alerts.json"
+# What the alerts profile sketches, and the published bounds of D07 and D14.
+QUANTILE_METRICS = ("latency_ms",)
+CARDINALITY_FIELDS = ("user",)
+QUANTILE_ALPHA = 0.01
+CARDINALITY_BOUND = 0.05
 
 
 def bin_dir():
@@ -73,6 +84,35 @@ def tenants(count, quota_eps):
     return [{"id": f"t{i + 1}", "quota_eps": quota_eps} for i in range(count)]
 
 
+def alerts_tenants():
+    """Return the configuration of the one tenant of the alerts profile, with its sketches."""
+    return [
+        {
+            "id": "t1",
+            "quota_eps": HIGH_QUOTA,
+            "quantile_metrics": list(QUANTILE_METRICS),
+            "cardinality_fields": list(CARDINALITY_FIELDS),
+        }
+    ]
+
+
+def _start_listening(command, output):
+    """Start a process that prints `listening` when ready; return it and its output so far."""
+    with open(output, "wb") as out:
+        proc = subprocess.Popen(command, stdout=out, stderr=subprocess.STDOUT)
+    deadline = time.monotonic() + _LISTEN_TIMEOUT_S
+    while True:
+        text = output.read_text(errors="replace")
+        if _LISTENING.search(text):
+            return proc, text
+        if proc.poll() is not None or time.monotonic() > deadline:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+            raise RuntimeError(f"{Path(command[0]).name} did not listen: {text}")
+        time.sleep(_POLL_S)
+
+
 class Serve:
     """`oteadero serve` on a free port with its config, data and export under work.
 
@@ -112,27 +152,17 @@ class Serve:
         """Start serve, wait for `listening` and return what it recovered."""
         self.starts += 1
         output = self.work / f"serve-{self.starts}.out"
-        with open(output, "wb") as out:
-            self.proc = subprocess.Popen(
-                [
-                    binary("oteadero"),
-                    "serve",
-                    "--config",
-                    self.config_path,
-                    "--export",
-                    self.export_dir,
-                ],
-                stdout=out,
-                stderr=subprocess.STDOUT,
-            )
-        deadline = time.monotonic() + _LISTEN_TIMEOUT_S
-        while True:
-            text = output.read_text(errors="replace")
-            if _LISTENING.search(text):
-                break
-            if self.proc.poll() is not None or time.monotonic() > deadline:
-                raise RuntimeError(f"serve did not listen: {text}")
-            time.sleep(_POLL_S)
+        self.proc, text = _start_listening(
+            [
+                binary("oteadero"),
+                "serve",
+                "--config",
+                self.config_path,
+                "--export",
+                self.export_dir,
+            ],
+            output,
+        )
         next_offset, truncated = _RECOVERED.search(text).groups()
         return {"next_offset": int(next_offset), "truncated_bytes": int(truncated)}
 
@@ -147,6 +177,112 @@ class Serve:
         code = self.proc.wait(timeout=_STOP_TIMEOUT_S)
         if code != 0:
             raise RuntimeError(f"serve exited with {code}")
+
+
+class Receiver:
+    """otrecv on a free port, logging to work/receiver.jsonl."""
+
+    def __init__(self, work):
+        self.work = work
+        self.port = free_port()
+        self.url = f"http://127.0.0.1:{self.port}"
+        self.log = work / "receiver.jsonl"
+        self.proc = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        if self.proc is not None and self.proc.poll() is None:
+            self.stop()
+
+    def start(self):
+        self.proc, _ = _start_listening(
+            [binary("otrecv"), "--listen", f"127.0.0.1:{self.port}", "--log", self.log],
+            self.work / "otrecv.out",
+        )
+
+    def stop(self):
+        """Stop otrecv; it serves until a signal, so its exit code says nothing."""
+        self.proc.terminate()
+        self.proc.wait(timeout=_STOP_TIMEOUT_S)
+
+
+class Evaluator:
+    """`oteadero evaluate` over the log and config of a Serve, exporting next to it.
+
+    Its checkpoints are <data_dir>/eval-<id>/ckpt/<offset>.ckpt, where offset is
+    the next event to read. Restarting after kill keeps the port.
+    """
+
+    def __init__(self, work, engine, receiver, evaluator_id="e1", rules=ALERTS_RULES):
+        self.work = work
+        self.engine = engine
+        self.receiver = receiver
+        self.id = evaluator_id
+        self.rules = rules
+        self.port = free_port()
+        self.ckpt_dir = engine.data_dir / f"eval-{evaluator_id}" / "ckpt"
+        self.proc = None
+        self.starts = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        if self.proc is not None and self.proc.poll() is None:
+            self.kill()
+
+    def start(self):
+        """Start the evaluator and wait until it replayed the log and listens."""
+        self.starts += 1
+        self.proc, _ = _start_listening(
+            [
+                binary("oteadero"),
+                "evaluate",
+                "--config",
+                self.engine.config_path,
+                "--id",
+                self.id,
+                "--rules",
+                self.rules,
+                "--coordinator",
+                self.engine.url,
+                "--receiver",
+                self.receiver.url,
+                "--listen",
+                f"127.0.0.1:{self.port}",
+                "--export",
+                self.engine.export_dir,
+            ],
+            self.work / f"{self.id}-{self.starts}.out",
+        )
+
+    def checkpoint_offsets(self):
+        """Return the offsets of the checkpoints on disk, oldest first."""
+        return sorted(int(path.stem) for path in self.ckpt_dir.glob("*.ckpt"))
+
+    def wait_offset(self, offset):
+        """Wait for a checkpoint at offset or later: everything before it is exported."""
+        deadline = time.monotonic() + _CATCH_UP_TIMEOUT_S
+        while not any(o >= offset for o in self.checkpoint_offsets()):
+            if self.proc.poll() is not None:
+                raise RuntimeError(f"evaluator {self.id} exited with {self.proc.returncode}")
+            if time.monotonic() > deadline:
+                raise RuntimeError(f"evaluator {self.id} did not reach offset {offset}")
+            time.sleep(_POLL_S)
+
+    def kill(self):
+        """Stop the evaluator the way kill -9 does."""
+        self.proc.send_signal(signal.SIGKILL)
+        self.proc.wait()
+
+    def stop(self):
+        """Stop the evaluator cleanly; anything but exit code 0 is an error."""
+        self.proc.terminate()
+        code = self.proc.wait(timeout=_STOP_TIMEOUT_S)
+        if code != 0:
+            raise RuntimeError(f"evaluator {self.id} exited with {code}")
 
 
 def start_otgen(profile, seed, url, report, duration_s=None):
@@ -176,6 +312,52 @@ def wait_otgen(proc, report):
 
 def run_otgen(profile, seed, url, report, duration_s=None):
     return wait_otgen(start_otgen(profile, seed, url, report, duration_s), report)
+
+
+def accepted_events(report):
+    """Return the events the engine confirmed, which is its next offset.
+
+    A run that must lose nothing fails on any dropped batch or connection error.
+    """
+    total = 0
+    for name, tenant in report["tenants"].items():
+        if tenant["errors"] or any(tenant["dropped"].values()):
+            raise RuntimeError(f"tenant {name} lost events: {tenant}")
+        total += tenant["acked"]
+    return total
+
+
+def run_alerts(work, seed, settings=None, during_load=None):
+    """Run serve, otrecv and evaluator e1 over the alerts load until e1 read all of it.
+
+    during_load(engine, evaluator, load), if given, runs while otgen sends and
+    returns the truncate offset of section 4.8 for the evaluator export.
+    Returns (engine, evaluator, truncate offset), all stopped.
+    """
+    report = work / "report.json"
+    truncate_offset = 0
+    with (
+        Serve(work, alerts_tenants(), **(settings or {})) as engine,
+        Receiver(work) as receiver,
+        Evaluator(work, engine, receiver) as evaluator,
+    ):
+        engine.start()
+        receiver.start()
+        evaluator.start()
+        load = start_otgen("alerts", seed, engine.url, report)
+        try:
+            if during_load is not None:
+                truncate_offset = during_load(engine, evaluator, load)
+            accepted = accepted_events(wait_otgen(load, report))
+        finally:
+            if load.poll() is None:
+                load.kill()
+                load.wait()
+        evaluator.wait_offset(accepted)
+        evaluator.stop()
+        receiver.stop()
+        engine.stop()
+    return engine, evaluator, truncate_offset
 
 
 def fetch_accounting(url):
@@ -222,6 +404,59 @@ def run_oracle(data_dir, out, idle_grace_ms=0):
     )
 
 
+def run_exact(data_dir, out, rules=None):
+    """Return the exact bucket rows of the oracle and, with rules, its exact sketch windows."""
+    command = [
+        sys.executable,
+        REPO_ROOT / "oracle" / "cli.py",
+        "exact",
+        "--data",
+        data_dir,
+        "--idle-grace-ms",
+        "0",
+        "--out",
+        out,
+    ]
+    if rules is not None:
+        command += ["--rules", rules]
+    subprocess.run(command, check=True)
+    out = Path(out)
+    windows = read_jsonl(out / "exact_windows.jsonl") if rules is not None else []
+    return read_jsonl(out / "exact_buckets.jsonl"), windows
+
+
+def run_oracle_rules(data_dir, out, rules, engine_evals):
+    """Replay the rules with the oracle and return its transitions.
+
+    engine_evals is the evals.jsonl whose values decide quantile and cardinality.
+    """
+    subprocess.run(
+        [
+            sys.executable,
+            REPO_ROOT / "oracle" / "cli.py",
+            "rules",
+            "--data",
+            data_dir,
+            "--idle-grace-ms",
+            "0",
+            "--rules",
+            rules,
+            "--engine-evals",
+            engine_evals,
+            "--out",
+            out,
+        ],
+        check=True,
+    )
+    return read_jsonl(Path(out) / "transitions.jsonl")
+
+
+def write_jsonl(path, rows):
+    with open(path, "w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, separators=(",", ":")) + "\n")
+
+
 def read_jsonl(path):
     """Return the rows of a JSONL file; kill -9 can leave a last line without its newline."""
     rows = []
@@ -233,11 +468,12 @@ def read_jsonl(path):
     return rows
 
 
-def export_runs(export_dir):
-    """Return the run directories of serve, oldest first; run_id starts with the start time."""
+def export_runs(export_dir, process="serve"):
+    """Return the run directories of a process, oldest first; run_id starts with the start time."""
+    prefix = f"{process}-"
     return sorted(
-        Path(export_dir).glob("serve-*"),
-        key=lambda run: (int(run.name.split("-")[1]), run.name),
+        Path(export_dir).glob(f"{prefix}*"),
+        key=lambda run: (int(run.name[len(prefix) :].split("-")[0]), run.name),
     )
 
 
@@ -249,8 +485,20 @@ def _bucket_values(row):
     return (row["count"], row["sum"], row["rate"])
 
 
-def union_exports(runs, truncate_offset):
-    """Join the bucket rows of each run, oldest first, with the rule of section 4.8.
+def _eval_key(row):
+    return (row["rule"], row["group"], row["t"])
+
+
+def _eval_value(row):
+    return row["value"]
+
+
+def _transition_state(row):
+    return row["state"]
+
+
+def union_exports(runs, truncate_offset, key=_bucket_key, values=_bucket_values):
+    """Join the rows of each run, oldest first, with the rule of section 4.8.
 
     Rows of earlier runs count only if closed_at is below the truncate offset;
     the last run is the one after the recovery. Returns the rows by key and the
@@ -263,12 +511,10 @@ def union_exports(runs, truncate_offset):
         for row in rows:
             if earlier and row["closed_at"] >= truncate_offset:
                 continue
-            key = _bucket_key(row)
-            seen = merged.setdefault(key, row)
-            if _bucket_values(seen) != _bucket_values(row):
-                conflicts.append(
-                    f"conflict {key}: {_bucket_values(seen)} and {_bucket_values(row)}"
-                )
+            k = key(row)
+            seen = merged.setdefault(k, row)
+            if values(seen) != values(row):
+                conflicts.append(f"conflict {k}: {values(seen)} and {values(row)}")
     return merged, conflicts
 
 
@@ -304,4 +550,157 @@ def check_windows(export_dir, oracle, truncate_offset=0):
         print(line)
     print(f"ventanas comparadas: {compared}")
     print(f"ventanas: {len(diffs)} diferencias")
+    return compared > 0 and not diffs
+
+
+def evaluator_evals(export_dir, evaluator_id, truncate_offset=0):
+    """Return the present evals of an evaluator by (rule, group, T), and the conflicts.
+
+    Rows of absent groups carry a null value and are left out.
+    """
+    runs = [read_jsonl(run / "evals.jsonl") for run in export_runs(export_dir, evaluator_id)]
+    merged, conflicts = union_exports(runs, truncate_offset, _eval_key, _eval_value)
+    return {k: row for k, row in merged.items() if row["value"] is not None}, conflicts
+
+
+def relative_error(value, exact):
+    if exact == 0:
+        return 0.0 if value == 0 else math.inf
+    return abs(value - exact) / abs(exact)
+
+
+def compare_relative(engine, exact, bound):
+    """Compare two maps key -> number within a relative error bound.
+
+    Returns the number of keys compared, the largest relative error among the
+    keys on both sides, and one line per key that is out of bound, missing or
+    left over.
+    """
+    diffs = []
+    worst = 0.0
+    keys = sorted(engine.keys() | exact.keys())
+    for key in keys:
+        if key not in engine:
+            diffs.append(f"missing {key}: exact {exact[key]}")
+        elif key not in exact:
+            diffs.append(f"extra {key}: engine {engine[key]}")
+        else:
+            error = relative_error(engine[key], exact[key])
+            worst = max(worst, error)
+            if error > bound:
+                diffs.append(
+                    f"out of bound {key}: engine {engine[key]} exact {exact[key]}"
+                    f" relative error {error:.6g}"
+                )
+    return len(keys), worst, diffs
+
+
+def _metric_name(series):
+    return series.split("{", 1)[0]
+
+
+def bucket_quantiles(rows):
+    """Return (tenant, series, end, q) -> value from bucket rows with q."""
+    return {
+        (row["tenant"], row["series"], row["end"], q): value
+        for row in rows
+        if "q" in row
+        for q, value in row["q"].items()
+    }
+
+
+def exact_bucket_quantiles(rows, metrics=QUANTILE_METRICS):
+    """Return the exact quantiles of the buckets of the sketched metrics, keyed like bucket_quantiles."""
+    return bucket_quantiles(row for row in rows if _metric_name(row["series"]) in metrics)
+
+
+def bucket_cardinalities(rows):
+    """Return (tenant, series, end, field) -> n from bucket rows with card."""
+    return {
+        (row["tenant"], row["series"], row["end"], field): n
+        for row in rows
+        if "card" in row
+        for field, n in row["card"].items()
+    }
+
+
+def exact_bucket_cardinalities(rows, fields=CARDINALITY_FIELDS):
+    """Return the exact distinct counts of the sketched fields of every log bucket.
+
+    A field without values in a bucket counts 0, as an empty HLL does.
+    """
+    return {
+        (row["tenant"], row["series"], row["end"], field): row["card"].get(field, 0)
+        for row in rows
+        if "card" in row
+        for field in fields
+    }
+
+
+def window_values(rows, rule_names):
+    """Return (rule, group, T) -> value of the rows of the named rules."""
+    return {_eval_key(row): row["value"] for row in rows if row["rule"] in rule_names}
+
+
+def load_rules(path=ALERTS_RULES):
+    return json.loads(Path(path).read_text())["rules"]
+
+
+def print_relative(label, compared, worst, diffs):
+    """Print the comparison of a sketch criterion and return whether it passes."""
+    for line in diffs[:_MAX_SHOWN]:
+        print(line)
+    print(f"{label} comparados: {compared}")
+    print(f"error relativo máximo: {worst:.6g}")
+    return compared > 0 and not diffs
+
+
+def compare_transitions(engine_runs, oracle_rows, truncate_offset=0):
+    """Compare the transitions (rule, group, T, state) of the engine with the oracle's.
+
+    engine_runs are the rows of each export run, oldest first, joined with the
+    rule of section 4.8. A (rule, group, T) has at most one transition, so a key
+    repeated within a run or with two states is a difference too. Returns the
+    number of keys compared and one line per difference.
+    """
+    diffs = []
+    for index, rows in enumerate(engine_runs):
+        seen = set()
+        for row in rows:
+            k = _eval_key(row)
+            if k in seen:
+                diffs.append(f"repeated {k} in run {index}")
+            seen.add(k)
+    merged, conflicts = union_exports(
+        engine_runs, truncate_offset, _eval_key, _transition_state
+    )
+    diffs += conflicts
+    engine = {k: row["state"] for k, row in merged.items()}
+    oracle = {}
+    for row in oracle_rows:
+        k = _eval_key(row)
+        if k in oracle:
+            diffs.append(f"repeated {k} in the oracle")
+        oracle[k] = row["state"]
+    keys = sorted(engine.keys() | oracle.keys())
+    for key in keys:
+        if key not in engine:
+            diffs.append(f"missing {key}: oracle {oracle[key]}")
+        elif key not in oracle:
+            diffs.append(f"extra {key}: engine {engine[key]}")
+        elif engine[key] != oracle[key]:
+            diffs.append(f"different {key}: engine {engine[key]} oracle {oracle[key]}")
+    return len(keys), diffs
+
+
+def check_transitions(export_dir, evaluator_id, oracle_rows, truncate_offset=0):
+    """Compare the transitions of an evaluator with the oracle's, print and return whether it passes."""
+    runs = [
+        read_jsonl(run / "transitions.jsonl") for run in export_runs(export_dir, evaluator_id)
+    ]
+    compared, diffs = compare_transitions(runs, oracle_rows, truncate_offset)
+    for line in diffs[:_MAX_SHOWN]:
+        print(line)
+    print(f"transiciones comparadas: {compared}")
+    print(f"transiciones: {len(diffs)} diferencias")
     return compared > 0 and not diffs

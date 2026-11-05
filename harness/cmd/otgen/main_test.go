@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -45,7 +47,7 @@ func sameBatches(a, b []batch) bool {
 	return true
 }
 
-var filledProfiles = []string{"basic", "late", "saturation", "fairness", "bench"}
+var filledProfiles = []string{"basic", "late", "saturation", "fairness", "bench", "alerts"}
 
 func TestSameSeedSameBytes(t *testing.T) {
 	for _, name := range filledProfiles {
@@ -224,6 +226,80 @@ func TestProfileParameters(t *testing.T) {
 	}
 	if b := cycles(t, "bench", 1, 1); b[0].n != 10000 || b[0].logs {
 		t.Errorf("bench batch: n = %d, logs = %v", b[0].n, b[0].logs)
+	}
+}
+
+func TestAlertsPhases(t *testing.T) {
+	seen := map[alertsPhase]int{}
+	for sec := range int64(alertsCycleS) {
+		total, gaps := 0, 0
+		for i := range alertsServices {
+			ph := alertsPhaseAt(sec, i)
+			seen[ph]++
+			total += alertsPhases[ph].weight
+			if ph == phaseGap {
+				gaps++
+			}
+		}
+		if total == 0 || gaps > 1 {
+			t.Errorf("second %d: total weight %d, %d services in a gap", sec, total, gaps)
+		}
+	}
+	// Every service goes through a gap of 15 s and every other phase.
+	if seen[phaseGap] != 15*len(alertsServices) || len(seen) != len(alertsPhases) {
+		t.Errorf("phases seen: %v", seen)
+	}
+}
+
+func TestAlertsLoad(t *testing.T) {
+	p, err := lookupProfile("alerts", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.tenants) != 1 || p.conns != 1 || !p.delayed || p.tenants[0].events != alertsEventsPerS*alertsSeconds {
+		t.Fatalf("alerts: %+v", p)
+	}
+	g := newGenerator(p, 0, 5, false)
+	names := map[string]int64{}
+	var logs, maxTs int64
+	for !g.done() {
+		for _, b := range g.cycle() {
+			if b.logs {
+				parsed, err := event.ParseLogs(nil, b.body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, l := range parsed {
+					if !strings.HasPrefix(l.Fields, `{user="u`) {
+						t.Fatalf("log fields %q", l.Fields)
+					}
+				}
+				logs += int64(len(parsed))
+				continue
+			}
+			parsed, err := event.ParseMetrics(nil, b.body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, m := range parsed {
+				name, _, _ := strings.Cut(m.Key, "{")
+				names[name]++
+				if name == "errors" && m.Value != math.Trunc(m.Value) {
+					t.Fatalf("errors value %v is not an integer", m.Value)
+				}
+				maxTs = max(maxTs, m.TsMs)
+			}
+		}
+	}
+	if logs == 0 || names["latency_ms"] == 0 || names["errors"] == 0 || len(names) != 2 {
+		t.Errorf("logs %d, metrics %v", logs, names)
+	}
+	if g.overLateness == 0 {
+		t.Error("no delay over L")
+	}
+	// Events of a step are spread over it, not stamped at its start.
+	if maxTs < syntheticBaseMs+(alertsSeconds-1)*1000+500 {
+		t.Errorf("max ts %d", maxTs)
 	}
 }
 
@@ -443,7 +519,9 @@ func TestRunRejectsBadUsage(t *testing.T) {
 		{"--profile", "basic", "--seed", "1", "--target", "http://x"},
 		{"--profile", "basic", "--seed", "1", "--report", report, "--sink", "disk"},
 		{"--profile", "nope", "--seed", "1", "--report", report, "--sink", "null"},
-		{"--profile", "alerts", "--seed", "1", "--report", report, "--sink", "null"},
+		{"--profile", "tail", "--seed", "1", "--report", report, "--sink", "null"},
+		{"--profile", "alerts", "--seed", "1", "--report", report, "--sink", "null", "--realtime"},
+		{"--profile", "alerts", "--seed", "1", "--report", report, "--sink", "null", "--duration-s", "5"},
 		{"--profile", "basic", "--seed", "1", "--report", report, "--sink", "null", "--duration-s", "5"},
 	} {
 		if code := run(args, io.Discard); code != 2 {

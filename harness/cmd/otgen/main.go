@@ -34,6 +34,19 @@ const (
 
 	logUsers = 10000
 
+	// The alerts profile: alertsEventsPerS events per synthetic second during
+	// alertsSeconds, paced so that an evaluator is still reading when a
+	// criterion kills it.
+	alertsEventsPerS = 2000
+	alertsSeconds    = 600
+	alertsRate       = 150000
+	// alertsInstances is the number of latency_ms and of errors series per
+	// service, and alertsStreams the number of log streams.
+	alertsInstances = 4
+	alertsStreams   = 2
+	// alertsCycleS is the period of the phases of a service.
+	alertsCycleS = 120
+
 	// pacedConns is the connections per tenant of the profiles with a rate.
 	// A connection waits for the fsync of its batch, so with too few of them
 	// the acks, not the rate, would set what a tenant offers, and a load meant
@@ -71,6 +84,9 @@ type profile struct {
 	stepMs      int64
 	delayed     bool
 	duration    time.Duration
+	// scenario replaces the random series of the mixed profiles with the
+	// services and phases of the alerts profile. It is synthetic only.
+	scenario bool
 }
 
 // lookupProfile returns the fixed parameters of a profile. durationS, when
@@ -131,7 +147,28 @@ func lookupProfile(name string, durationS float64) (profile, error) {
 			stepMs:       1,
 			duration:     time.Duration(d * float64(time.Second)),
 		}, nil
-	case "alerts", "tail", "reference":
+	case "alerts":
+		if durationS > 0 {
+			return profile{}, fmt.Errorf("profile %q has a fixed event count, not a duration", name)
+		}
+		// One connection: batches of a cycle span half a second of event
+		// time and must reach the log in order, or the delays of D15 would
+		// not be the only source of lateness.
+		return profile{
+			name: name,
+			tenants: []tenantPlan{{
+				name:       "t1",
+				rate:       alertsRate,
+				events:     alertsEventsPerS * alertsSeconds,
+				stepEvents: alertsEventsPerS,
+			}},
+			batchEvents: 1000,
+			conns:       1,
+			stepMs:      1000,
+			delayed:     true,
+			scenario:    true,
+		}, nil
+	case "tail", "reference":
 		return profile{}, fmt.Errorf("profile %q is declared but not filled yet", name)
 	}
 	return profile{}, fmt.Errorf("unknown profile %q", name)
@@ -167,6 +204,10 @@ func newGenerator(p profile, tenant int, seed uint64, realtime bool) *generator 
 		metricKeys: make([]string, p.metricSeries),
 		logHeads:   make([]string, p.logSeries),
 		free:       make(chan []byte, 2*p.conns+2),
+	}
+	if p.scenario {
+		g.metricKeys, g.logHeads = alertsKeys()
+		return g
 	}
 	for i := range g.metricKeys {
 		name := "otgen_requests"
@@ -236,8 +277,13 @@ func (g *generator) cycle() []batch {
 	var nMetrics, nLogs int64
 	for range n {
 		ts := now
+		sec := g.generated / g.plan.stepEvents
 		if !g.realtime {
-			ts = syntheticBaseMs + g.generated/g.plan.stepEvents*g.p.stepMs
+			ts = syntheticBaseMs + sec*g.p.stepMs
+			if g.p.scenario {
+				// Spread the events of a step over it.
+				ts += g.generated % g.plan.stepEvents * g.p.stepMs / g.plan.stepEvents
+			}
 		}
 		if g.p.delayed {
 			d := drawDelay(g.r)
@@ -247,7 +293,15 @@ func (g *generator) cycle() []batch {
 			}
 		}
 		g.maxTs = max(g.maxTs, ts)
-		if s := g.r.IntN(len(g.metricKeys) + len(g.logHeads)); s < len(g.metricKeys) {
+		if g.p.scenario {
+			var isLog bool
+			metrics, logs, isLog = g.appendScenario(metrics, logs, sec, ts)
+			if isLog {
+				nLogs++
+			} else {
+				nMetrics++
+			}
+		} else if s := g.r.IntN(len(g.metricKeys) + len(g.logHeads)); s < len(g.metricKeys) {
 			metrics = g.appendMetric(metrics, s, ts)
 			nMetrics++
 		} else {
@@ -292,6 +346,117 @@ func (g *generator) appendLog(b []byte, series int, ts int64) []byte {
 	b = append(b, `","user":"u`...)
 	b = strconv.AppendInt(b, g.r.Int64N(logUsers), 10)
 	return append(b, `"},"msg":"request"}`+"\n"...)
+}
+
+// alertsServices are the services of the alerts profile. The shifts of their
+// phases keep the gaps apart, so that some service always sends.
+var alertsServices = [...]struct {
+	name  string
+	shift int64
+}{{"api", 0}, {"db", 40}, {"web", 80}}
+
+// alertsPhase is what a service does during one synthetic second.
+type alertsPhase int
+
+const (
+	phaseNormal alertsPhase = iota
+	phaseHigh
+	phaseOscHigh
+	phaseOscLow
+	phaseGap
+)
+
+// alertsPhases sets, per phase, the share of the events of the second that the
+// service gets, the location of its lognormal latency, its error deltas in
+// [errorsMin, errorsMin+errorsSpan) and the number of users its logs draw from.
+// The high phase crosses the thresholds of rules/alerts.json, the two
+// oscillating ones alternate around them every 3 s, and a gap sends nothing.
+var alertsPhases = [...]struct {
+	weight     int
+	latencyMu  float64
+	errorsMin  int64
+	errorsSpan int64
+	users      int64
+}{
+	phaseNormal:  {2, 3.0, 0, 3, 50},
+	phaseHigh:    {4, 5.0, 5, 10, 5000},
+	phaseOscHigh: {3, 4.2, 3, 4, 1500},
+	phaseOscLow:  {2, 3.6, 1, 3, 300},
+	phaseGap:     {0, 0, 0, 1, 1},
+}
+
+// alertsPhaseAt returns the phase of a service at a synthetic second: within
+// each cycle of 120 s, 30 s normal, 20 s high, 30 s oscillating, a gap of 15 s
+// without data and 25 s normal.
+func alertsPhaseAt(sec int64, service int) alertsPhase {
+	p := (sec + alertsServices[service].shift) % alertsCycleS
+	switch {
+	case p >= 30 && p < 50:
+		return phaseHigh
+	case p >= 50 && p < 80:
+		if (p-50)/3%2 == 0 {
+			return phaseOscHigh
+		}
+		return phaseOscLow
+	case p >= 80 && p < 95:
+		return phaseGap
+	}
+	return phaseNormal
+}
+
+// alertsKeys returns the metric keys, latency_ms of every service and instance
+// and then errors in the same order, and the heads of the log streams.
+func alertsKeys() ([]string, []string) {
+	var metrics, logs []string
+	for _, name := range []string{"latency_ms", "errors"} {
+		for _, s := range alertsServices {
+			for i := range alertsInstances {
+				metrics = append(metrics, fmt.Sprintf("%s{instance=\"i%d\",svc=\"%s\"} ", name, i, s.name))
+			}
+		}
+	}
+	for _, s := range alertsServices {
+		for i := range alertsStreams {
+			logs = append(logs, fmt.Sprintf(`,"labels":{"stream":"s%d","svc":"%s"},"fields":{"user":"u`, i, s.name))
+		}
+	}
+	return metrics, logs
+}
+
+// appendScenario writes the next event of the alerts profile at second sec:
+// a service drawn by the weights of its phase, then 45% latency_ms, 15%
+// errors and 40% logs. It reports whether the event went to logs.
+func (g *generator) appendScenario(metrics, logs []byte, sec, ts int64) ([]byte, []byte, bool) {
+	var phases [len(alertsServices)]alertsPhase
+	total := 0
+	for i := range alertsServices {
+		phases[i] = alertsPhaseAt(sec, i)
+		total += alertsPhases[phases[i]].weight
+	}
+	service := 0
+	for pick := g.r.IntN(total); pick >= alertsPhases[phases[service]].weight; service++ {
+		pick -= alertsPhases[phases[service]].weight
+	}
+	ph := alertsPhases[phases[service]]
+	switch k := g.r.IntN(100); {
+	case k < 45:
+		metrics = append(metrics, g.metricKeys[service*alertsInstances+g.r.IntN(alertsInstances)]...)
+		metrics = strconv.AppendFloat(metrics, math.Exp(ph.latencyMu+g.r.NormFloat64()), 'g', -1, 64)
+	case k < 60:
+		first := (len(alertsServices) + service) * alertsInstances
+		metrics = append(metrics, g.metricKeys[first+g.r.IntN(alertsInstances)]...)
+		metrics = strconv.AppendInt(metrics, ph.errorsMin+g.r.Int64N(ph.errorsSpan), 10)
+	default:
+		logs = append(logs, `{"ts":`...)
+		logs = strconv.AppendInt(logs, ts, 10)
+		logs = append(logs, g.logHeads[service*alertsStreams+g.r.IntN(alertsStreams)]...)
+		logs = strconv.AppendInt(logs, g.r.Int64N(ph.users), 10)
+		logs = append(logs, `"},"msg":"request"}`+"\n"...)
+		return metrics, logs, true
+	}
+	metrics = append(metrics, ' ')
+	metrics = strconv.AppendInt(metrics, ts, 10)
+	return append(metrics, '\n'), logs, false
 }
 
 func (g *generator) lognormal() float64 {
@@ -502,6 +667,9 @@ func run(args []string, stderr io.Writer) int {
 		return 2
 	}
 	p, err := lookupProfile(*name, *durationS)
+	if err == nil && p.scenario && *realtime {
+		err = fmt.Errorf("profile %q is synthetic only", *name)
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "otgen: %v\n", err)
 		return 2
