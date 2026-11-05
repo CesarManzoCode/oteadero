@@ -32,6 +32,29 @@ type SketchConfig struct {
 	CardinalityFields []string
 }
 
+// DDSketch returns the DDSketch of the bucket, or nil if it has none. Like the
+// bucket it must not be changed.
+func (b *Bucket) DDSketch() *sketch.DDSketch {
+	if e, ok := b.Ext.(*quantileExt); ok {
+		return e.dd
+	}
+	return nil
+}
+
+// HLL returns the HLL of field in the bucket, or nil if it has none. Like the
+// bucket it must not be changed.
+func (b *Bucket) HLL(field string) *sketch.HLL {
+	e, ok := b.Ext.(*cardinalityExt)
+	if !ok {
+		return nil
+	}
+	i, found := slices.BinarySearch(e.names, field)
+	if !found {
+		return nil
+	}
+	return &e.hlls[i]
+}
+
 // exportedExt is an extension that adds members to its line of buckets.jsonl.
 type exportedExt interface {
 	appendExport(dst []byte) []byte
@@ -207,7 +230,7 @@ func newCardinalityExt(names []string) *cardinalityExt {
 func (e *cardinalityExt) Add(_ float64, fields string) {
 	j := 0
 	for i := 1; i < len(fields) && j < len(e.names); {
-		name, value, next, ok := nextField(fields, i)
+		name, value, next, ok := event.NextLabel(fields, i)
 		if !ok {
 			return
 		}
@@ -220,28 +243,6 @@ func (e *cardinalityExt) Add(_ float64, fields string) {
 		}
 		i = next
 	}
-}
-
-// nextField reads the name="value" pair of a canonical label set that starts
-// at s[i], and returns where the next pair starts.
-func nextField(s string, i int) (name, value string, next int, ok bool) {
-	eq := strings.IndexByte(s[i:], '=')
-	if eq < 0 {
-		return "", "", 0, false
-	}
-	name = s[i : i+eq]
-	start := i + eq + 2 // past =" of the pair
-	end := start
-	for end < len(s) && s[end] != '"' {
-		if s[end] == '\\' {
-			end++
-		}
-		end++
-	}
-	if end >= len(s) {
-		return "", "", 0, false
-	}
-	return name, s[start:end], end + 2, true // past the quote and , or }
 }
 
 // Close implements Ext.

@@ -78,6 +78,17 @@ type Subscriber interface {
 	Late(tenant string, offset uint64)
 }
 
+// Advancer is a Subscriber that also follows the watermark. Advanced runs
+// after the buckets the step closed: upTo is the largest multiple of S the
+// tenant watermark has reached and everything with end ≤ upTo has been
+// delivered. Every multiple of S a watermark crosses falls in a step, so the
+// steps are enough to find the evaluation instants of §4.5. The first call for
+// a tenant is the one that defines its watermark, unless Restore already did.
+type Advancer interface {
+	Subscriber
+	Advanced(tenant string, upTo int64, closedAt uint64)
+}
+
 // OpenBucket is the exact state of an open bucket in a checkpoint.
 type OpenBucket struct {
 	Tenant string
@@ -145,6 +156,7 @@ type Aggregator struct {
 	bucketMs int64
 	newExt   ExtFactory
 	subs     []Subscriber
+	advs     []Advancer
 	shards   []*shard
 	marks    map[string]*watermark
 	scratch  []*Bucket
@@ -200,6 +212,9 @@ func (a *Aggregator) RestoreSketchErrorMax(v float64) { a.errMax.raise(v) }
 // first event.
 func (a *Aggregator) Subscribe(s Subscriber) {
 	a.subs = append(a.subs, s)
+	if adv, ok := s.(Advancer); ok {
+		a.advs = append(a.advs, adv)
+	}
 }
 
 // Start runs the shards and the merger in their own goroutines.
@@ -362,6 +377,9 @@ func (a *Aggregator) emit(j *job) {
 			}
 		}
 		a.scratch = out
+		for _, adv := range a.advs {
+			adv.Advanced(j.steps[k].tenant, j.steps[k].upTo, j.steps[k].closedAt)
+		}
 	}
 	for _, l := range j.late[late:] {
 		a.emitLate(l)

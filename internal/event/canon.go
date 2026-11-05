@@ -41,6 +41,33 @@ func MetricKey(name string, ls []Label) string {
 	return string(AppendLabels([]byte(name), ls))
 }
 
+// EscapeValue returns v as it appears inside a canonical label set.
+func EscapeValue(v string) string {
+	return string(appendEscaped(nil, v))
+}
+
+// NextLabel reads the name="value" pair of a canonical label set that starts
+// at s[i], and returns where the next pair starts. The value stays escaped.
+func NextLabel(s string, i int) (name, value string, next int, ok bool) {
+	eq := strings.IndexByte(s[i:], '=')
+	if eq < 0 {
+		return "", "", 0, false
+	}
+	name = s[i : i+eq]
+	start := i + eq + 2 // past =" of the pair
+	end := start
+	for end < len(s) && s[end] != '"' {
+		if s[end] == '\\' {
+			end++
+		}
+		end++
+	}
+	if end >= len(s) {
+		return "", "", 0, false
+	}
+	return name, s[start:end], end + 2, true // past the quote and , or }
+}
+
 func appendEscaped(dst []byte, v string) []byte {
 	for i := 0; i < len(v); i++ {
 		switch c := v[i]; c {

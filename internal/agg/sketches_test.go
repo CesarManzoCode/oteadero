@@ -345,3 +345,18 @@ func TestUnconfiguredTenantGetsNoExtension(t *testing.T) {
 		}
 	}
 }
+
+func TestBucketSketchAccessors(t *testing.T) {
+	metric := &Bucket{Ext: &quantileExt{dd: sketch.NewDDSketch()}}
+	if metric.DDSketch() == nil || metric.HLL("user") != nil {
+		t.Fatal("a metric bucket has a DDSketch and no HLL")
+	}
+	log := &Bucket{Ext: newCardinalityExt([]string{"user"})}
+	if log.DDSketch() != nil || log.HLL("user") == nil || log.HLL("other") != nil {
+		t.Fatal("a log bucket has an HLL per configured field and no DDSketch")
+	}
+	plain := &Bucket{}
+	if plain.DDSketch() != nil || plain.HLL("user") != nil {
+		t.Fatal("a bucket without extension has no sketches")
+	}
+}

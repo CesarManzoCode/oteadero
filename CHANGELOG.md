@@ -4,6 +4,7 @@
 
 ### Added
 
+- Reglas de alerta y su evaluación (§4.5–§4.7, D08, D22): carga y validación del JSON de reglas; ventanas `(T−R, T]` por regla y grupo sobre las cubetas cerradas, con conteo, suma, tasa, cuantil y cardinalidad; máquina de estados con `for`, `keep_firing_for` e histéresis; `incident_id` y claves de idempotencia, y estado serializable para el checkpoint. Aún sin proceso ni notificaciones.
 - Cuantiles y cardinalidad por cubeta (§4.8, §4.10, D07): las series de `quantile_metrics` llevan un DDSketch con error relativo publicado de 1% y las de logs un HyperLogLog por campo de `cardinality_fields`; `buckets.jsonl` añade `q` y `card` en esas series, los sketches entran en el checkpoint y 1 de cada 1000 cubetas con DDSketch guarda sus valores exactos para publicar el error observado en `oteadero_sketch_observed_rel_error_max`.
 
 ## [k1] - 2026-11-05

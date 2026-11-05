@@ -360,3 +360,48 @@ func TestRestoreLoadsOpenBuckets(t *testing.T) {
 		t.Fatalf("open = %+v, want %+v", got, ref.agg.OpenBuckets())
 	}
 }
+
+// advanceRec records buckets and watermark steps in one sequence.
+type advanceRec struct {
+	recorder
+	seq []string
+}
+
+func (r *advanceRec) Closed(b *Bucket) {
+	r.seq = append(r.seq, fmt.Sprintf("closed %d", b.End-base))
+}
+
+func (r *advanceRec) Advanced(tenant string, upTo int64, closedAt uint64) {
+	r.seq = append(r.seq, fmt.Sprintf("advanced %s %d %d", tenant, upTo-base, closedAt))
+}
+
+func TestAdvancedFollowsTheBucketsOfItsStep(t *testing.T) {
+	a, err := New(Config{BucketMs: 1000, Shards: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := &advanceRec{}
+	a.Subscribe(rec)
+	send := func(offset uint64, ts, w int64) {
+		a.Batch(&ingest.CommittedBatch{
+			Batch:       &event.Batch{Tenant: "a", Kind: event.KindMetrics, Metrics: []event.Metric{{Key: "m{}", TsMs: base + ts}}},
+			FirstOffset: offset,
+			Late:        []bool{false},
+			Watermark:   []int64{base + w},
+		})
+	}
+	send(0, 500, -1500)
+	send(1, 600, -1400) // no multiple of S crossed
+	send(2, 3500, 1500)
+	a.Tick(&ingest.TickEffect{NextOffset: 3, Advances: []ingest.WatermarkAdvance{{Tenant: "a", Watermark: base + 4000}}})
+	want := []string{
+		"advanced a -2000 0",
+		"closed 1000",
+		"advanced a 1000 2",
+		"closed 4000",
+		"advanced a 4000 2",
+	}
+	if !reflect.DeepEqual(rec.seq, want) {
+		t.Fatalf("sequence = %q, want %q", rec.seq, want)
+	}
+}

@@ -26,6 +26,24 @@ func TestCanonicalLabels(t *testing.T) {
 	}
 }
 
+func TestNextLabelWalksCanonicalLabels(t *testing.T) {
+	s := CanonicalLabels([]Label{{"b", `x"y`}, {"a", "1,2=3"}})
+	name, value, next, ok := NextLabel(s, 1)
+	if !ok || name != "a" || value != "1,2=3" {
+		t.Fatalf("first = %q %q %v", name, value, ok)
+	}
+	name, value, next, ok = NextLabel(s, next)
+	if !ok || name != "b" || value != EscapeValue(`x"y`) {
+		t.Fatalf("second = %q %q %v", name, value, ok)
+	}
+	if _, _, _, ok = NextLabel(s, next); ok {
+		t.Fatal("read a label past the end")
+	}
+	if _, _, _, ok = NextLabel("{}", 1); ok {
+		t.Fatal("read a label in an empty set")
+	}
+}
+
 func TestMetricKey(t *testing.T) {
 	got := MetricKey("http_requests", []Label{{"svc", "api"}, {"__name__", "http_requests"}, {"code", "200"}})
 	if want := `http_requests{code="200",svc="api"}`; got != want {
