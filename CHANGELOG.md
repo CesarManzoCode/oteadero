@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Cuantiles y cardinalidad por cubeta (§4.8, §4.10, D07): las series de `quantile_metrics` llevan un DDSketch con error relativo publicado de 1% y las de logs un HyperLogLog por campo de `cardinality_fields`; `buckets.jsonl` añade `q` y `card` en esas series, los sketches entran en el checkpoint y 1 de cada 1000 cubetas con DDSketch guarda sus valores exactos para publicar el error observado en `oteadero_sketch_observed_rel_error_max`.
+
 ## [k1] - 2026-11-05
 
 Ingestión durable, ventanas exactas y oráculo independiente.

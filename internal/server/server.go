@@ -75,8 +75,10 @@ func New(cfg config.Config, d Deps) (*Server, error) {
 		FsyncMaxDelay: time.Duration(cfg.FsyncMaxDelayMs) * time.Millisecond,
 	}
 	known := make(map[string]bool, len(cfg.Tenants))
+	sketches := make(map[string]agg.SketchConfig, len(cfg.Tenants))
 	for _, t := range cfg.Tenants {
 		known[t.ID] = true
+		sketches[t.ID] = agg.SketchConfig{QuantileMetrics: t.QuantileMetrics, CardinalityFields: t.CardinalityFields}
 		icfg.Tenants = append(icfg.Tenants, ingest.TenantConfig{
 			ID:          t.ID,
 			QuotaEPS:    t.QuotaEPS,
@@ -85,7 +87,7 @@ func New(cfg config.Config, d Deps) (*Server, error) {
 			QueueEvents: t.QueueEvents,
 		})
 	}
-	a, err := agg.New(agg.Config{BucketMs: cfg.BucketMs, Shards: cfg.Shards})
+	a, err := agg.New(agg.Config{BucketMs: cfg.BucketMs, Shards: cfg.Shards, Sketches: sketches})
 	if err != nil {
 		return nil, err
 	}
@@ -308,6 +310,8 @@ func (s *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 			line("oteadero_queue_depth_events", stats[i].QueuedEvents, event.Label{Name: "queue", Value: stats[i].Tenant})
 		}
 	}
+	out.WriteString("# TYPE oteadero_sketch_observed_rel_error_max gauge\n")
+	fmt.Fprintf(&out, "oteadero_sketch_observed_rel_error_max %v\n", s.agg.SketchErrorMax())
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	w.Write(out.Bytes())

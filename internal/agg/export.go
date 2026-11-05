@@ -72,6 +72,9 @@ func (e *Export) Closed(b *Bucket) {
 	buf = appendJSONFloat(buf, b.Rate)
 	buf = append(buf, `,"closed_at":`...)
 	buf = strconv.AppendUint(buf, b.ClosedAt, 10)
+	if x, ok := b.Ext.(exportedExt); ok {
+		buf = x.appendExport(buf)
+	}
 	e.buckets.buf = append(buf, '}', '\n')
 	e.spill(&e.buckets)
 }

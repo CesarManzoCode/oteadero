@@ -86,6 +86,8 @@ type setup struct {
 	sub     agg.Subscriber
 	opts    Options
 	segment int64
+	// sketches may be nil.
+	sketches map[string]agg.SketchConfig
 }
 
 // node is one life of the process: everything but the disk and the clock.
@@ -106,7 +108,7 @@ func wire(t *testing.T, su setup) *node {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a, err := agg.New(agg.Config{BucketMs: ingest.DefaultBucketMs, Shards: su.shards})
+	a, err := agg.New(agg.Config{BucketMs: ingest.DefaultBucketMs, Shards: su.shards, Sketches: su.sketches})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,6 +210,7 @@ func sampleState() *State {
 			{Tenant: "a", Series: "n{}", Kind: event.KindMetrics, End: 3000, Count: 1, Sum: math.Copysign(0, -1), Ext: []byte{1, 2, 3}},
 			{Tenant: "b", Series: `{app="x"}`, Kind: event.KindLogs, End: 3000, Count: 7},
 		},
+		SketchErrorMax: 0.0099,
 	}
 	st.Snapshot.Tenants[0].Dropped[ingest.CauseQuota] = 2
 	return st
@@ -233,6 +236,9 @@ func TestRoundTripIsExact(t *testing.T) {
 	}
 	if !bytes.Equal(got.Buckets[1].Ext, []byte{1, 2, 3}) || got.Buckets[0].Ext != nil {
 		t.Errorf("extension state = %v, %v", got.Buckets[1].Ext, got.Buckets[0].Ext)
+	}
+	if got.SketchErrorMax != st.SketchErrorMax {
+		t.Errorf("sketch error max = %v, want %v", got.SketchErrorMax, st.SketchErrorMax)
 	}
 	if string(data[:8]) != "OTCKPT01" {
 		t.Errorf("magic = %q", data[:8])
@@ -790,5 +796,69 @@ func TestExportSurvivesCrashWithCheckpoint(t *testing.T) {
 	}
 	if got := readAll(t, mem, "exp/serve-r2/buckets.jsonl"); len(got) == 0 {
 		t.Fatal("replay did not re-emit what closed after the checkpoint")
+	}
+}
+
+func TestSketchesSurviveCrashWithCheckpoint(t *testing.T) {
+	mem := vfs.NewMem()
+	clk := clock.NewManual(base)
+	su := setup{fsys: mem, clk: clk, shards: 2, sketches: map[string]agg.SketchConfig{
+		"a": {QuantileMetrics: []string{"lat"}, CardinalityFields: []string{"user"}},
+	}}
+	n := start(t, su)
+	// So many buckets close that some are audited, whichever the hash picks.
+	const closing = 20_000
+	b := &event.Batch{Tenant: "a", Kind: event.KindMetrics}
+	for i := range closing {
+		b.Metrics = append(b.Metrics, event.Metric{Key: "lat{}", Value: 1.234, TsMs: base + int64(i)*1000})
+	}
+	n.send(b)
+	n.send(&event.Batch{Tenant: "a", Kind: event.KindLogs, Logs: []event.Log{
+		{TsMs: base + closing*1000, Labels: `{app="x"}`, Fields: `{user="u1"}`, Msg: "m"},
+	}})
+	n.barrier()
+	wantMax := n.agg.SketchErrorMax()
+	if wantMax <= 0 || wantMax > 0.01 {
+		t.Fatalf("maximum before the crash = %v", wantMax)
+	}
+	wantOpen := n.agg.OpenBuckets()
+	withState := 0
+	for i := range wantOpen {
+		if len(wantOpen[i].Ext) > 0 {
+			withState++
+		}
+	}
+	if withState < 2 {
+		t.Fatalf("open buckets = %+v", wantOpen)
+	}
+	mem.Crash(rng.New(7))
+
+	m := start(t, su)
+	if !m.rep.FromCheckpoint || m.rep.Offset != closing+1 {
+		t.Fatalf("report = %+v", m.rep)
+	}
+	if got := m.agg.SketchErrorMax(); got != wantMax {
+		t.Fatalf("maximum after the crash = %v, want %v", got, wantMax)
+	}
+	if got := m.agg.OpenBuckets(); !reflect.DeepEqual(got, wantOpen) {
+		t.Fatalf("open buckets differ after the crash:\n got %+v\nwant %+v", got, wantOpen)
+	}
+}
+
+func TestSketchConfigChangeFailsRecovery(t *testing.T) {
+	mem := vfs.NewMem()
+	clk := clock.NewManual(base)
+	su := setup{fsys: mem, clk: clk, shards: 2, sketches: map[string]agg.SketchConfig{"a": {CardinalityFields: []string{"user"}}}}
+	n := start(t, su)
+	n.send(&event.Batch{Tenant: "a", Kind: event.KindLogs, Logs: []event.Log{
+		{TsMs: base, Labels: `{app="x"}`, Fields: `{user="u1"}`, Msg: "m"},
+	}})
+	n.barrier()
+	mem.Crash(rng.New(7))
+
+	su.sketches = map[string]agg.SketchConfig{"a": {CardinalityFields: []string{"host"}}}
+	m := wire(t, su)
+	if _, err := m.mgr.Recover(m.seq); err == nil {
+		t.Fatal("recovered open buckets under another cardinality_fields")
 	}
 }

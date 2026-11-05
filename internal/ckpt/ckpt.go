@@ -112,7 +112,7 @@ func (m *Manager) Checkpoint(snap *ingest.Snapshot) error {
 			return err
 		}
 	}
-	if err := m.write(&State{Snapshot: *snap, Buckets: m.agg.OpenBuckets()}); err != nil {
+	if err := m.write(&State{Snapshot: *snap, Buckets: m.agg.OpenBuckets(), SketchErrorMax: m.agg.SketchErrorMax()}); err != nil {
 		return err
 	}
 	if err := m.prune(); err != nil {
@@ -323,6 +323,7 @@ func (m *Manager) Recover(seq *ingest.Sequencer) (Report, error) {
 		if err := m.agg.Restore(st.Buckets, watermarks(&st.Snapshot)); err != nil {
 			return rep, err
 		}
+		m.agg.RestoreSketchErrorMax(st.SketchErrorMax)
 		rep.FromCheckpoint = true
 		rep.Offset = st.Snapshot.Pos.Next
 		return rep, m.replay(seq, r)

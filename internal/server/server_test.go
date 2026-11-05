@@ -347,6 +347,65 @@ func TestExport(t *testing.T) {
 	}
 }
 
+func TestExportCarriesConfiguredSketches(t *testing.T) {
+	mem := vfs.NewMem()
+	cfg := testConfig()
+	cfg.Tenants[0].QuantileMetrics = []string{"m"}
+	cfg.Tenants[0].CardinalityFields = []string{"u"}
+	f := start(t, cfg, mem, "exp")
+	f.wantMetrics("oteadero_sketch_observed_rel_error_max 0")
+	line := func(u string) string {
+		return fmt.Sprintf(`{"ts": %d, "labels": {"app": "x"}, "fields": {"u": %q}, "msg": "hi"}`, t0, u) + "\n"
+	}
+	f.wantAccepted("/v1/logs", "a", line("1")+line("2")+line("1"), 3, 0)
+	f.wantAccepted("/v1/metrics", "a", sample(t0)+"n{} 1 "+fmt.Sprint(t0)+"\n"+sample(t0+5000), 3, 3)
+	f.close()
+
+	runs, err := mem.ReadDir("exp")
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("runs = %v, %v", runs, err)
+	}
+	file, err := mem.Open("exp/" + runs[0] + "/buckets.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.NewSectionReader(file, 0, 1<<20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var withQ, withCard int
+	for l := range strings.Lines(string(data)) {
+		var got struct {
+			Series string
+			Q      map[string]float64
+			Card   map[string]uint64
+		}
+		if err := json.Unmarshal([]byte(l), &got); err != nil {
+			t.Fatalf("line %q: %v", l, err)
+		}
+		switch got.Series {
+		case `m{k="v"}`:
+			withQ++
+			if len(got.Q) != 4 || got.Card != nil {
+				t.Errorf("line %q", l)
+			}
+		case `{app="x"}`:
+			withCard++
+			if got.Q != nil || got.Card["u"] != 2 {
+				t.Errorf("line %q", l)
+			}
+		default:
+			if got.Q != nil || got.Card != nil {
+				t.Errorf("line %q", l)
+			}
+		}
+	}
+	if withQ != 1 || withCard != 1 {
+		t.Fatalf("buckets.jsonl = %s", data)
+	}
+}
+
 func TestNewRejectsBadConfig(t *testing.T) {
 	cfg := testConfig()
 	cfg.Tenants = append(cfg.Tenants, cfg.Tenants[0]) // duplicate id

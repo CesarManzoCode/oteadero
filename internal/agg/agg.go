@@ -26,10 +26,13 @@ const (
 	addOp = int32(-1)
 )
 
-// Ext is the per-bucket extension point for what K2 computes besides count
+// Ext is the per-bucket extension point for what is computed besides count
 // and sum. It sees the events of its bucket in log order.
 type Ext interface {
 	Add(value float64, fields string)
+	// Close runs once on the shard, as the bucket closes and before it is
+	// emitted.
+	Close()
 	// AppendState appends the exact state for a checkpoint.
 	AppendState(dst []byte) []byte
 	// LoadState loads what AppendState wrote.
@@ -38,7 +41,7 @@ type Ext interface {
 
 // ExtFactory returns the extension of a new bucket of the series, or nil
 // when the series has none.
-type ExtFactory func(tenant, series string, kind event.Kind) Ext
+type ExtFactory func(tenant, series string, end int64, kind event.Kind) Ext
 
 // Config configures an Aggregator.
 type Config struct {
@@ -48,6 +51,9 @@ type Config struct {
 	Shards int
 	// NewExt may be nil.
 	NewExt ExtFactory
+	// Sketches, by tenant, gives the buckets the extensions of D07. It may be
+	// nil and excludes NewExt.
+	Sketches map[string]SketchConfig
 }
 
 // Bucket is a closed bucket. Subscribers share it and must not change it.
@@ -144,6 +150,7 @@ type Aggregator struct {
 	scratch  []*Bucket
 	merge    chan *job
 	stopped  chan struct{}
+	errMax   errorMax
 }
 
 var _ ingest.Sink = (*Aggregator)(nil)
@@ -159,22 +166,35 @@ func New(cfg Config) (*Aggregator, error) {
 	if cfg.Shards == 0 {
 		cfg.Shards = DefaultShards
 	}
+	if cfg.Sketches != nil && cfg.NewExt != nil {
+		return nil, errors.New("agg: Sketches and NewExt exclude each other")
+	}
 	a := &Aggregator{
 		bucketMs: cfg.BucketMs,
 		newExt:   cfg.NewExt,
 		shards:   make([]*shard, cfg.Shards),
 		marks:    map[string]*watermark{},
 	}
+	if cfg.Sketches != nil {
+		a.newExt = sketchFactory(cfg.Sketches, &a.errMax)
+	}
 	for i := range a.shards {
 		a.shards[i] = &shard{
 			index:     i,
 			bucketSec: float64(cfg.BucketMs) / 1000,
-			newExt:    cfg.NewExt,
+			newExt:    a.newExt,
 			tenants:   map[string]*openTenant{},
 		}
 	}
 	return a, nil
 }
+
+// SketchErrorMax returns the largest relative error observed in the audited
+// buckets (§4.10). It can be read at any time.
+func (a *Aggregator) SketchErrorMax() float64 { return a.errMax.load() }
+
+// RestoreSketchErrorMax raises the maximum to what a checkpoint holds.
+func (a *Aggregator) RestoreSketchErrorMax(v float64) { a.errMax.raise(v) }
 
 // Subscribe adds s to the receivers of what is emitted. Call it before the
 // first event.
@@ -450,7 +470,7 @@ func (t *openTenant) bucket(s *shard, tenant, key string, end int64, kind event.
 	if o == nil {
 		o = &openState{kind: kind}
 		if s.newExt != nil {
-			o.ext = s.newExt(tenant, key, kind)
+			o.ext = s.newExt(tenant, key, end, kind)
 		}
 		series[key] = o
 	}
@@ -500,6 +520,9 @@ func (s *shard) closeUpTo(st *closeStep, step int32, out []stepBucket) []stepBuc
 }
 
 func (s *shard) closed(st *closeStep, key string, end int64, o *openState) *Bucket {
+	if o.ext != nil {
+		o.ext.Close()
+	}
 	rate := o.sum / s.bucketSec
 	if o.kind == event.KindLogs {
 		rate = float64(o.count) / s.bucketSec

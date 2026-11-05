@@ -21,7 +21,7 @@ const (
 	// Magic opens every checkpoint file.
 	Magic = "OTCKPT01"
 	// Version is the format of the state after the header.
-	Version = 1
+	Version = 2
 
 	// headerSize is magic + u32 version + u32 CRC-32 IEEE of the body.
 	headerSize = len(Magic) + 4 + 4
@@ -31,11 +31,13 @@ const (
 // version, wrong CRC or a body that does not follow the format.
 var ErrInvalid = errors.New("ckpt: invalid checkpoint")
 
-// State is what a checkpoint holds: the sequencer's snapshot and the open
-// buckets of the shards at the same point of the log.
+// State is what a checkpoint holds: the sequencer's snapshot, the open
+// buckets of the shards at the same point of the log and the largest sketch
+// error observed so far.
 type State struct {
-	Snapshot ingest.Snapshot
-	Buckets  []agg.OpenBucket
+	Snapshot       ingest.Snapshot
+	Buckets        []agg.OpenBucket
+	SketchErrorMax float64
 }
 
 // Encode returns the file image of st. Integers are little-endian, strings
@@ -84,6 +86,7 @@ func Encode(st *State) []byte {
 		b = binary.AppendUvarint(b, uint64(len(o.Ext)))
 		b = append(b, o.Ext...)
 	}
+	b = binary.LittleEndian.AppendUint64(b, math.Float64bits(st.SketchErrorMax))
 
 	binary.LittleEndian.PutUint32(b[len(Magic):], Version)
 	binary.LittleEndian.PutUint32(b[len(Magic)+4:], crc32.ChecksumIEEE(b[headerSize:]))
@@ -162,6 +165,8 @@ func Decode(data []byte) (*State, error) {
 			}
 		}
 	}
+
+	st.SketchErrorMax = math.Float64frombits(r.u64())
 
 	if r.bad {
 		return nil, fmt.Errorf("%w: truncated body", ErrInvalid)

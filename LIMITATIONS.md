@@ -11,6 +11,11 @@ Fuente única de lo que el proyecto no demuestra. Ningún otro archivo repite es
 - Los descartes no están en el log: tras una caída, los ocurridos desde el último checkpoint se pierden de los contadores, igual que los lotes en cola sin confirmar. El balde de cuota arranca lleno tras cada reinicio.
 - Un cuerpo por encima de `max_body_bytes`, o cortado por el cliente, no se lee entero: sus descartes se cuentan por las líneas recibidas, no por las que el productor envió.
 - Nada impide arrancar dos `serve` sobre el mismo `data_dir` con puertos distintos; el log solo admite un escritor y esa corrida lo corrompería.
+- Un valor NaN cuenta en `count` y `sum` de su cubeta, pero no entra en sus cuantiles, y una cubeta con solo NaN exporta los cuantiles como `NaN`. ±Inf se ordenan en los extremos y se devuelven exactos.
+- La cota de error de los cuantiles vale para valores normales de float64. Con subnormales (|x| < 2^−1022) la propia representación puede redondear el estimador más allá de α.
+- Cambiar `quantile_metrics` o `cardinality_fields` hace fallar la recuperación si el checkpoint tiene cubetas abiertas de las series afectadas, en lugar de mezclar estados distintos.
+- Cada HyperLogLog ocupa 16 KiB por campo y cubeta abierta, y un DDSketch sin colapso crece con el rango de sus valores: la memoria de las series con sketch crece con series × campos × cubetas abiertas, sin un tope propio.
+- El error observado de `oteadero_sketch_observed_rel_error_max` se mide solo sobre 1 de cada 1000 cubetas con DDSketch; las cubetas auditadas guardan todos sus valores en memoria y en el checkpoint.
 - En los exports, una suma o tasa NaN o ±Inf se escribe con los tokens `NaN`, `Infinity` y `-Infinity`, que lee el módulo `json` de Python pero no son JSON estricto.
 - No hay trazas; solo métricas (contadores delta y gauges) y logs estructurados.
 - La interfaz es HTTP/1.1 con texto de Prometheus y NDJSON. No se implementa gRPC, remote write de Prometheus ni OTLP, y no se demuestra "millones de usuarios".

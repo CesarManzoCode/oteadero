@@ -45,11 +45,16 @@ type rig struct {
 
 func newRig(t *testing.T, shards int, graceMs int64, ext ExtFactory) *rig {
 	t.Helper()
+	return newRigConfig(t, Config{BucketMs: ingest.DefaultBucketMs, Shards: shards, NewExt: ext}, graceMs)
+}
+
+func newRigConfig(t *testing.T, acfg Config, graceMs int64) *rig {
+	t.Helper()
 	l, _, err := wal.Open(vfs.NewMem(), "data/log", rng.New(1), wal.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	a, err := New(Config{BucketMs: ingest.DefaultBucketMs, Shards: shards, NewExt: ext})
+	a, err := New(acfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,6 +283,7 @@ func TestSameEmissionsForAnyShardCount(t *testing.T) {
 type countExt struct{ n byte }
 
 func (e *countExt) Add(float64, string)           { e.n++ }
+func (e *countExt) Close()                        {}
 func (e *countExt) AppendState(dst []byte) []byte { return append(dst, e.n) }
 func (e *countExt) LoadState(state []byte) error {
 	if len(state) != 1 {
@@ -288,7 +294,7 @@ func (e *countExt) LoadState(state []byte) error {
 }
 
 func TestBucketExtension(t *testing.T) {
-	onlyM := func(_, series string, _ event.Kind) Ext {
+	onlyM := func(_, series string, _ int64, _ event.Kind) Ext {
 		if strings.HasPrefix(series, "m") {
 			return &countExt{}
 		}
