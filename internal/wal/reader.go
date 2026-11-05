@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,10 @@ import (
 
 // ErrOffsetGone reports an offset older than the oldest segment.
 var ErrOffsetGone = errors.New("wal: offset no longer in the log")
+
+// ErrRewound reports a segment now shorter than what the reader consumed: a
+// recovery of the writer truncated records the reader had already seen.
+var ErrRewound = errors.New("wal: log truncated behind the reader")
 
 // Reader reads records in log order, moving across segments. It sees what
 // has been written to the files; Next returns io.EOF at the end of the data
@@ -123,7 +128,10 @@ func (r *Reader) Next() (Record, error) {
 		if err != nil {
 			return Record{}, err
 		}
-		typ, payload, end, buf, err := readRecord(r.f, r.pos.Byte, size, r.buf)
+		if size < r.pos.Byte {
+			return Record{}, fmt.Errorf("%w: segment %s has %d bytes, reader at %d", ErrRewound, segName(r.pos.Segment), size, r.pos.Byte)
+		}
+		typ, payload, end, crc, buf, err := readRecord(r.f, r.pos.Byte, size, r.buf)
 		r.buf = buf
 		switch {
 		case err == nil:
@@ -131,7 +139,7 @@ func (r *Reader) Next() (Record, error) {
 			if err != nil {
 				return Record{}, err
 			}
-			rec := Record{Type: typ, Payload: payload, Offset: r.pos.Next, Events: n, Pos: r.pos}
+			rec := Record{Type: typ, Payload: payload, Offset: r.pos.Next, Events: n, Pos: r.pos, CRC: crc}
 			r.pos = Pos{Segment: r.pos.Segment, Byte: end, Next: r.pos.Next + n}
 			return rec, nil
 		case errors.Is(err, errBadRecord):
@@ -147,6 +155,16 @@ func (r *Reader) Next() (Record, error) {
 				err = io.EOF
 			}
 			return Record{}, err
+		}
+		// The writer finishes a segment before it creates the next one, so
+		// this size is final: what arrived since the first read is still to
+		// be read.
+		final, err := r.f.Size()
+		if err != nil {
+			return Record{}, err
+		}
+		if final != size {
+			continue
 		}
 		if size != r.pos.Byte {
 			return Record{}, fmt.Errorf("%w: segment %s has %d trailing bytes", ErrCorrupt, segName(r.pos.Segment), size-r.pos.Byte)
@@ -184,6 +202,30 @@ func (r *Reader) nextSegment() (uint64, bool, error) {
 		return b, size >= HeaderSize, nil
 	}
 	return 0, false, nil
+}
+
+// RecordMatches reports whether the record that starts at byte start of the
+// segment still ends at byte end with checksum crc. It is how a reader's saved
+// position is checked against a log that a recovery may have rewritten.
+func RecordMatches(fsys vfs.FS, dir string, segment uint64, start, end int64, crc uint32) (bool, error) {
+	f, err := fsys.Open(filepath.Join(dir, segName(segment)))
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	size, err := f.Size()
+	if err != nil {
+		return false, err
+	}
+	if end > size || end-start < frameSize {
+		return false, nil
+	}
+	var frame [frameSize]byte
+	if _, err := f.ReadAt(frame[:], start); err != nil {
+		return false, err
+	}
+	n := int64(binary.LittleEndian.Uint32(frame[:4]))
+	return start+frameSize+n == end && binary.LittleEndian.Uint32(frame[4:]) == crc, nil
 }
 
 // Close closes the reader.

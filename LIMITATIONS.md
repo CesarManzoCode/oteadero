@@ -17,6 +17,15 @@ Fuente única de lo que el proyecto no demuestra. Ningún otro archivo repite es
 - Cada HyperLogLog ocupa 16 KiB por campo y cubeta abierta, y un DDSketch sin colapso crece con el rango de sus valores: la memoria de las series con sketch crece con series × campos × cubetas abiertas, sin un tope propio.
 - El error observado de `oteadero_sketch_observed_rel_error_max` se mide solo sobre 1 de cada 1000 cubetas con DDSketch; las cubetas auditadas guardan todos sus valores en memoria y en el checkpoint.
 - En los exports, una suma o tasa NaN o ±Inf se escribe con los tokens `NaN`, `Infinity` y `-Infinity`, que lee el módulo `json` de Python pero no son JSON estricto.
+- `oteadero evaluate` lee los segmentos sin esperar al fsync de `serve`: un corte de energía o un truncado del log puede dejar notificaciones o líneas de export de registros que la recuperación de `serve` corta después. Si el evaluador está vivo cuando el log se acorta detrás de él, vuelve a su checkpoint con una corrida de export nueva; las notificaciones ya enviadas no se retiran.
+- Cada evaluador agrega y evalúa en un solo hilo, así que su ritmo de lectura del log no escala con los núcleos y puede quedar detrás de `serve` con mucha carga. Sigue el log por sondeo cada 10 ms.
+- Un evaluador que queda detrás de la retención de segmentos, o sin checkpoint con el primer segmento ya borrado, no se recupera: el proceso termina con error.
+- Cambiar el archivo de reglas hace fallar la recuperación del evaluador si tiene checkpoints; hay que borrar `<data_dir>/eval-<id>/`, y entonces sus claves confirmadas se pierden y el receptor deduplica los reenvíos.
+- Los reenvíos de una promoción solo cubren 10 min de tiempo de evento por inquilino: una notificación que ningún líder entregó en ese tiempo se abandona, contada con `status="expired"`. Ese estado también cuenta, en los seguidores, las claves que el líder entregó y ellos dejan salir de la ventana.
+- Un líder guarda sin tope lo que no ha podido confirmar mientras conserva el arrendamiento, aunque salga de la ventana: con el receptor caído su memoria crece con las transiciones.
+- `oteadero_notifications_total` empieza en cero con cada arranque del evaluador; no está en el checkpoint.
+- En el cuerpo de una notificación, un valor NaN o ±Inf va como `null`, igual que el de un grupo ausente.
+- Si se pierde un LEASE ya confirmado, como al truncar a mano el último registro del log, la época puede retroceder y dos evaluadores pueden creer que tienen la misma: las épocas valen mientras el log conserve lo sincronizado.
 - No hay trazas; solo métricas (contadores delta y gauges) y logs estructurados.
 - La interfaz es HTTP/1.1 con texto de Prometheus y NDJSON. No se implementa gRPC, remote write de Prometheus ni OTLP, y no se demuestra "millones de usuarios".
 - No se demuestran Terraform, Ansible, infraestructura inmutable, el borde TypeScript/GraphQL ni operar ClickHouse o VictoriaMetrics a escala; estos dos solo se usan como referencia.

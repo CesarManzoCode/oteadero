@@ -73,6 +73,24 @@ func (w *watermarks) apply(b *event.Batch) (late []bool, wm []int64, nLate int) 
 	return late, wm, nLate
 }
 
+// classify applies the rules to b, whose first event has offset first.
+func (w *watermarks) classify(b *event.Batch, first uint64) *CommittedBatch {
+	late, wm, nLate := w.apply(b)
+	return &CommittedBatch{
+		Batch:       b,
+		FirstOffset: first,
+		Late:        late,
+		Watermark:   wm,
+		LateCount:   nLate,
+	}
+}
+
+// applyTick applies a TICK at server time tsMs, followed by the event with
+// offset next.
+func (w *watermarks) applyTick(tsMs int64, next uint64) *TickEffect {
+	return &TickEffect{TsMs: tsMs, NextOffset: next, Advances: w.tick(tsMs)}
+}
+
 // tick applies a TICK at server time tsMs and returns the tenants whose
 // watermark rose, with the new watermark.
 func (w *watermarks) tick(tsMs int64) []WatermarkAdvance {
@@ -120,3 +138,31 @@ func (w *watermarks) minMaxTs() (int64, bool) {
 	}
 	return lo, true
 }
+
+// Classifier applies §4.4 to the records of a log for a reader that is not the
+// sequencer: it gives an aggregator what the sequencer gives its own, so both
+// get the same results from the same log.
+type Classifier struct {
+	wm *watermarks
+}
+
+// NewClassifier returns a Classifier with no state.
+func NewClassifier(bucketMs, latenessMs, idleGraceMs int64) *Classifier {
+	return &Classifier{wm: newWatermarks(bucketMs, latenessMs, idleGraceMs)}
+}
+
+// Batch classifies a BATCH record whose first event has offset first.
+func (c *Classifier) Batch(b *event.Batch, first uint64) *CommittedBatch {
+	return c.wm.classify(b, first)
+}
+
+// Tick applies a TICK record followed by the event with offset next.
+func (c *Classifier) Tick(tsMs int64, next uint64) *TickEffect {
+	return c.wm.applyTick(tsMs, next)
+}
+
+// Marks returns the watermark state, for a Snapshot.
+func (c *Classifier) Marks() []Mark { return c.wm.marks() }
+
+// Restore replaces the watermark state with what Marks returned.
+func (c *Classifier) Restore(marks []Mark) { c.wm.restore(marks) }

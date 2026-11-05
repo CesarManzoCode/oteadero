@@ -21,7 +21,7 @@ const (
 	// Magic opens every checkpoint file.
 	Magic = "OTCKPT01"
 	// Version is the format of the state after the header.
-	Version = 2
+	Version = 3
 
 	// headerSize is magic + u32 version + u32 CRC-32 IEEE of the body.
 	headerSize = len(Magic) + 4 + 4
@@ -32,12 +32,14 @@ const (
 var ErrInvalid = errors.New("ckpt: invalid checkpoint")
 
 // State is what a checkpoint holds: the sequencer's snapshot, the open
-// buckets of the shards at the same point of the log and the largest sketch
-// error observed so far.
+// buckets of the shards at the same point of the log, the largest sketch
+// error observed so far and whatever else the process keeps at that point,
+// opaque here: an evaluator stores its rules and outbox in Extra.
 type State struct {
 	Snapshot       ingest.Snapshot
 	Buckets        []agg.OpenBucket
 	SketchErrorMax float64
+	Extra          []byte
 }
 
 // Encode returns the file image of st. Integers are little-endian, strings
@@ -53,6 +55,9 @@ func Encode(st *State) []byte {
 	b = appendI64(b, snap.BucketMs)
 	b = appendI64(b, snap.LatenessMs)
 	b = appendI64(b, snap.IdleGraceMs)
+	b = binary.LittleEndian.AppendUint64(b, snap.Lease.Epoch)
+	b = appendString(b, snap.Lease.Holder)
+	b = appendI64(b, snap.Lease.ExpiresMs)
 
 	b = binary.AppendUvarint(b, uint64(len(snap.Marks)))
 	for _, m := range snap.Marks {
@@ -87,6 +92,8 @@ func Encode(st *State) []byte {
 		b = append(b, o.Ext...)
 	}
 	b = binary.LittleEndian.AppendUint64(b, math.Float64bits(st.SketchErrorMax))
+	b = binary.AppendUvarint(b, uint64(len(st.Extra)))
+	b = append(b, st.Extra...)
 
 	binary.LittleEndian.PutUint32(b[len(Magic):], Version)
 	binary.LittleEndian.PutUint32(b[len(Magic)+4:], crc32.ChecksumIEEE(b[headerSize:]))
@@ -122,6 +129,7 @@ func Decode(data []byte) (*State, error) {
 	snap.BucketMs = r.i64()
 	snap.LatenessMs = r.i64()
 	snap.IdleGraceMs = r.i64()
+	snap.Lease = wal.Lease{Epoch: r.u64(), Holder: r.string(), ExpiresMs: r.i64()}
 
 	if n := r.count(9); n > 0 {
 		snap.Marks = make([]ingest.Mark, n)
@@ -167,6 +175,9 @@ func Decode(data []byte) (*State, error) {
 	}
 
 	st.SketchErrorMax = math.Float64frombits(r.u64())
+	if extra := r.bytes(); len(extra) > 0 {
+		st.Extra = extra
+	}
 
 	if r.bad {
 		return nil, fmt.Errorf("%w: truncated body", ErrInvalid)

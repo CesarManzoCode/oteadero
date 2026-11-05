@@ -630,3 +630,136 @@ func TestSegmentsAndRemoveSegment(t *testing.T) {
 		t.Fatalf("segments = %v, want %v", after, bases[1:])
 	}
 }
+
+// readDirHook runs fn at the first ReadDir, which is when a reader at the end of
+// a segment looks for the next one.
+type readDirHook struct {
+	vfs.FS
+	fn func()
+}
+
+func (h *readDirHook) ReadDir(name string) ([]string, error) {
+	if fn := h.fn; fn != nil {
+		h.fn = nil
+		fn()
+	}
+	return h.FS.ReadDir(name)
+}
+
+func TestReaderDoesNotSkipWhatTheWriterAddsAsItRotates(t *testing.T) {
+	mem := vfs.NewMem()
+	payload := batchPayload("a", 1, nil)
+	record := int64(frameSize + 1 + len(payload))
+	l, _, err := Open(mem, dir, rng.New(1), Options{SegmentBytes: HeaderSize + 2*record})
+	if err != nil {
+		t.Fatal(err)
+	}
+	add := func() {
+		t.Helper()
+		if _, err := l.AppendBatch(payload, 1); err != nil {
+			t.Fatal(err)
+		}
+		if err := l.Sync(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add()
+	hook := &readDirHook{FS: mem}
+	r, err := OpenReader(hook, dir, start(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if rec, err := r.Next(); err != nil || rec.Offset != 0 {
+		t.Fatalf("first record: %+v, %v", rec, err)
+	}
+
+	// While the reader, at the end of the data it knows, looks for a next
+	// segment, the writer fills this one and rotates.
+	hook.fn = func() {
+		add()
+		add()
+	}
+	for want := uint64(1); want <= 2; want++ {
+		rec, err := r.Next()
+		if err != nil || rec.Offset != want {
+			t.Fatalf("record %d: %+v, %v", want, rec, err)
+		}
+	}
+	if _, err := r.Next(); err != io.EOF {
+		t.Fatalf("at the end: %v", err)
+	}
+}
+
+func TestReaderReportsTruncationBehindIt(t *testing.T) {
+	mem := vfs.NewMem()
+	l, _, err := Open(mem, dir, rng.New(1), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.AppendBatch(batchPayload("a", 1, nil), 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	r, err := OpenReader(mem, dir, start(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	rec, err := r.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := mem.OpenAppend(filepath.Join(dir, segName(0)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := f.Truncate(rec.Pos.Byte); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Next(); !errors.Is(err, ErrRewound) {
+		t.Fatalf("after the truncation: %v", err)
+	}
+}
+
+func TestRecordMatches(t *testing.T) {
+	mem := vfs.NewMem()
+	l, _, err := Open(mem, dir, rng.New(1), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.AppendBatch(batchPayload("a", 1, nil), 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	r, err := OpenReader(mem, dir, start(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	rec, err := r.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	end := r.Pos().Byte
+	for _, c := range []struct {
+		start, end int64
+		crc        uint32
+		want       bool
+	}{
+		{rec.Pos.Byte, end, rec.CRC, true},
+		{rec.Pos.Byte, end, rec.CRC + 1, false},
+		{rec.Pos.Byte, end - 1, rec.CRC, false},
+		{rec.Pos.Byte, end + 1, rec.CRC, false},
+	} {
+		got, err := RecordMatches(mem, dir, 0, c.start, c.end, c.crc)
+		if err != nil || got != c.want {
+			t.Errorf("RecordMatches(%d, %d, %x) = %v, %v, want %v", c.start, c.end, c.crc, got, err, c.want)
+		}
+	}
+}

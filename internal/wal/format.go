@@ -35,6 +35,10 @@ const (
 // does not repair.
 var ErrCorrupt = errors.New("wal: corrupt log")
 
+// ErrShortHeader, inside an ErrCorrupt, reports a segment whose header is not
+// complete: a reader that follows the writer can just be early.
+var ErrShortHeader = errors.New("wal: short segment header")
+
 // Pos is a point between records: the segment (by its first offset), the
 // byte inside it, and the offset of the next event at that point.
 type Pos struct {
@@ -54,6 +58,8 @@ type Record struct {
 	Events uint64
 	// Pos is where the record starts.
 	Pos Pos
+	// CRC is the checksum of its frame.
+	CRC uint32
 }
 
 func segName(base uint64) string {

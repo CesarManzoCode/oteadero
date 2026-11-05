@@ -31,6 +31,9 @@ type Snapshot struct {
 	IdleGraceMs int64
 	// Marks is in first-event order, the order TICK effects depend on.
 	Marks []Mark
+	// Lease is the last LEASE record before Pos, which the segment removal
+	// may have taken from the log.
+	Lease wal.Lease
 	// Tenants holds the counters as of Pos. The batches still queued have
 	// no ack and no record, and a recovery forgets them, so the queues are
 	// empty here: QueuedEvents is zero and they are not in Received nor
@@ -97,6 +100,7 @@ func (s *Sequencer) snapshot() Snapshot {
 		LatenessMs:  s.wm.latenessMs,
 		IdleGraceMs: s.idleGraceMs,
 		Marks:       s.wm.marks(),
+		Lease:       s.lease,
 		Tenants:     stats,
 	}
 }
@@ -116,6 +120,7 @@ func (s *Sequencer) Restore(snap *Snapshot) error {
 			snap.BucketMs, snap.LatenessMs, snap.IdleGraceMs, s.wm.bucketMs, s.wm.latenessMs, s.idleGraceMs)
 	}
 	s.wm.restore(snap.Marks)
+	s.lease = snap.Lease
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, x := range snap.Marks {
@@ -156,6 +161,12 @@ func (s *Sequencer) Replay(r *wal.Reader) error {
 				return fmt.Errorf("replay at offset %d: %w", rec.Offset, err)
 			}
 			s.deliver([]delivery{{tick: s.applyTick(ts, rec.Offset)}})
+		case wal.TypeLease:
+			l, err := wal.DecodeLease(rec.Payload)
+			if err != nil {
+				return fmt.Errorf("replay at offset %d: %w", rec.Offset, err)
+			}
+			s.lease = l
 		}
 	}
 }

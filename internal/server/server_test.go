@@ -418,3 +418,49 @@ func TestNewRejectsBadConfig(t *testing.T) {
 		t.Fatal("empty data dir accepted")
 	}
 }
+
+func (f *fixture) lease(holder string) (int, string) {
+	f.t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/v1/lease", strings.NewReader(`{"holder":"`+holder+`"}`))
+	rec := f.serve(req)
+	return rec.Code, strings.TrimSpace(rec.Body.String())
+}
+
+func TestLeaseEndpoint(t *testing.T) {
+	mem := vfs.NewMem()
+	f := start(t, testConfig(), mem, "")
+	for _, c := range []struct {
+		holder string
+		code   int
+		body   string
+	}{
+		{"e1", 200, `{"epoch":1,"holder":"e1","ttl_ms":2000}`},
+		{"e2", 409, `{"holder":"e1"}`},
+		{"e1", 200, `{"epoch":1,"holder":"e1","ttl_ms":2000}`},
+	} {
+		if code, body := f.lease(c.holder); code != c.code || body != c.body {
+			t.Errorf("lease(%s) = %d %s, want %d %s", c.holder, code, body, c.code, c.body)
+		}
+	}
+	for _, body := range []string{"", "{", `{"holder":""}`} {
+		rec := f.serve(httptest.NewRequest(http.MethodPost, "/v1/lease", strings.NewReader(body)))
+		if rec.Code != 400 {
+			t.Errorf("body %q: %d", body, rec.Code)
+		}
+	}
+
+	// A restart at the same clock keeps both the epoch and the exclusion.
+	f.close()
+	f = start(t, testConfig(), mem, "")
+	if code, body := f.lease("e2"); code != 409 || body != `{"holder":"e1"}` {
+		t.Errorf("after the restart: %d %s", code, body)
+	}
+	if code, body := f.lease("e1"); code != 200 || body != `{"epoch":1,"holder":"e1","ttl_ms":2000}` {
+		t.Errorf("after the restart: %d %s", code, body)
+	}
+
+	f.srv.Drain()
+	if code, _ := f.lease("e1"); code != 503 {
+		t.Errorf("while draining: %d", code)
+	}
+}

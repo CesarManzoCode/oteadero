@@ -205,9 +205,9 @@ func (e *quantileExt) appendExport(dst []byte) []byte {
 		if i > 0 {
 			dst = append(dst, ',')
 		}
-		dst = appendJSONString(dst, quantiles[i].label)
+		dst = AppendJSONString(dst, quantiles[i].label)
 		dst = append(dst, ':')
-		dst = appendJSONFloat(dst, e.q[i])
+		dst = AppendJSONFloat(dst, e.q[i])
 	}
 	return append(dst, '}')
 }
@@ -291,7 +291,7 @@ func (e *cardinalityExt) appendExport(dst []byte) []byte {
 		if i > 0 {
 			dst = append(dst, ',')
 		}
-		dst = appendJSONString(dst, name)
+		dst = AppendJSONString(dst, name)
 		dst = append(dst, ':')
 		dst = strconv.AppendUint(dst, e.card[i], 10)
 	}

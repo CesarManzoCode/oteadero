@@ -155,6 +155,22 @@ func (m *Manager) write(st *State) error {
 	return m.fsys.SyncDir(m.dir)
 }
 
+// Save writes st and prunes the older files. It is the part of a checkpoint
+// for a process that reads a log it does not own, which recovers by itself
+// with Offsets and Load and never removes a segment.
+func (m *Manager) Save(st *State) error {
+	if err := m.write(st); err != nil {
+		return err
+	}
+	return m.prune()
+}
+
+// Offsets returns the offsets of the checkpoint files, ascending.
+func (m *Manager) Offsets() ([]uint64, error) { return m.offsets() }
+
+// Load reads and decodes the checkpoint at offset.
+func (m *Manager) Load(offset uint64) (*State, error) { return m.load(offset) }
+
 // offsets returns the offsets of the checkpoint files, ascending.
 func (m *Manager) offsets() ([]uint64, error) {
 	names, err := m.fsys.ReadDir(m.dir)
@@ -320,7 +336,7 @@ func (m *Manager) Recover(seq *ingest.Sequencer) (Report, error) {
 		if err != nil {
 			return rep, err
 		}
-		if err := m.agg.Restore(st.Buckets, watermarks(&st.Snapshot)); err != nil {
+		if err := m.agg.Restore(st.Buckets, Watermarks(&st.Snapshot)); err != nil {
 			return rep, err
 		}
 		m.agg.RestoreSketchErrorMax(st.SketchErrorMax)
@@ -348,7 +364,9 @@ func (m *Manager) replay(seq *ingest.Sequencer, r *wal.Reader) error {
 	return nil
 }
 
-func watermarks(snap *ingest.Snapshot) []ingest.WatermarkAdvance {
+// Watermarks returns the tenant watermarks of snap, as Aggregator.Restore takes
+// them.
+func Watermarks(snap *ingest.Snapshot) []ingest.WatermarkAdvance {
 	out := make([]ingest.WatermarkAdvance, len(snap.Marks))
 	for i, x := range snap.Marks {
 		out[i] = ingest.WatermarkAdvance{Tenant: x.Tenant, Watermark: x.MaxTs - snap.LatenessMs}

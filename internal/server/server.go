@@ -6,6 +6,7 @@ package server
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"github.com/CesarManzoCode/oteadero/internal/ckpt"
 	"github.com/CesarManzoCode/oteadero/internal/clock"
 	"github.com/CesarManzoCode/oteadero/internal/config"
+	"github.com/CesarManzoCode/oteadero/internal/eval"
 	"github.com/CesarManzoCode/oteadero/internal/event"
 	"github.com/CesarManzoCode/oteadero/internal/ingest"
 	"github.com/CesarManzoCode/oteadero/internal/rng"
@@ -27,6 +29,9 @@ import (
 
 // TenantHeader names the tenant of a batch (§4.1).
 const TenantHeader = "X-Oteadero-Tenant"
+
+// maxLeaseBody bounds the body of a lease request, which only holds an id.
+const maxLeaseBody = 4096
 
 // Deps is what the server reads the outside world through (D03).
 type Deps struct {
@@ -51,6 +56,7 @@ type Server struct {
 	opened    wal.Recovery
 	agg       *agg.Aggregator
 	seq       *ingest.Sequencer
+	coord     *eval.Coordinator
 	mgr       *ckpt.Manager
 	export    *agg.Export
 	ckptEvery time.Duration
@@ -116,6 +122,7 @@ func New(cfg config.Config, d Deps) (*Server, error) {
 		opened:    opened,
 		agg:       a,
 		seq:       seq,
+		coord:     eval.NewCoordinator(d.Clock, seq, cfg.LeaseTTLMs),
 		mgr:       ckpt.New(d.FS, cfg.DataDir, a, opts),
 		export:    export,
 		ckptEvery: time.Duration(cfg.CheckpointIntervalMs) * time.Millisecond,
@@ -127,6 +134,7 @@ func New(cfg config.Config, d Deps) (*Server, error) {
 	}
 	s.mux.HandleFunc("POST /v1/metrics", func(w http.ResponseWriter, r *http.Request) { s.ingest(w, r, event.KindMetrics) })
 	s.mux.HandleFunc("POST /v1/logs", func(w http.ResponseWriter, r *http.Request) { s.ingest(w, r, event.KindLogs) })
+	s.mux.HandleFunc("POST /v1/lease", s.lease)
 	s.mux.HandleFunc("GET /metrics", s.metrics)
 	s.mux.HandleFunc("GET /healthz", s.healthz)
 	return s, nil
@@ -139,6 +147,7 @@ func (s *Server) Start() (Recovery, error) {
 	if _, err := s.mgr.Recover(s.seq); err != nil {
 		return Recovery{}, err
 	}
+	s.coord.Restore(s.seq.LastLease())
 	s.seq.SetCheckpointer(s.mgr, s.ckptEvery, s.ckptCount)
 	rec := Recovery{NextOffset: s.log.NextOffset(), TruncatedBytes: s.opened.TruncatedBytes}
 	s.agg.Start()
@@ -261,6 +270,32 @@ func writeJSON(w http.ResponseWriter, status int, format string, args ...any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	fmt.Fprintf(w, format+"\n", args...)
+}
+
+// lease handles POST /v1/lease of D09. The coordinator answers once the LEASE
+// record is synced.
+func (s *Server) lease(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Holder string `json:"holder"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxLeaseBody)).Decode(&req); err != nil || req.Holder == "" {
+		writeJSON(w, http.StatusBadRequest, `{"error":"invalid"}`)
+		return
+	}
+	decided := make(chan eval.Decision, 1)
+	s.coord.Acquire(req.Holder, func(d eval.Decision) { decided <- d })
+	d := <-decided
+	holder := agg.AppendJSONString(nil, d.Holder)
+	switch {
+	case errors.Is(d.Err, eval.ErrClosing):
+		writeJSON(w, http.StatusServiceUnavailable, `{"error":"shutting_down"}`)
+	case d.Err != nil:
+		writeJSON(w, http.StatusInternalServerError, `{"error":"log_failure"}`)
+	case !d.Granted:
+		writeJSON(w, http.StatusConflict, `{"holder":%s}`, holder)
+	default:
+		writeJSON(w, http.StatusOK, `{"epoch":%d,"holder":%s,"ttl_ms":%d}`, d.Epoch, holder, d.TTLMs)
+	}
 }
 
 func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {

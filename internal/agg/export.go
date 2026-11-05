@@ -59,17 +59,17 @@ func NewExport(fsys vfs.FS, dir, runID string) (*Export, error) {
 // Closed implements Subscriber.
 func (e *Export) Closed(b *Bucket) {
 	buf := append(e.buckets.buf, `{"tenant":`...)
-	buf = appendJSONString(buf, b.Tenant)
+	buf = AppendJSONString(buf, b.Tenant)
 	buf = append(buf, `,"series":`...)
-	buf = appendJSONString(buf, b.Series)
+	buf = AppendJSONString(buf, b.Series)
 	buf = append(buf, `,"end":`...)
 	buf = strconv.AppendInt(buf, b.End, 10)
 	buf = append(buf, `,"count":`...)
 	buf = strconv.AppendUint(buf, b.Count, 10)
 	buf = append(buf, `,"sum":`...)
-	buf = appendJSONFloat(buf, b.Sum)
+	buf = AppendJSONFloat(buf, b.Sum)
 	buf = append(buf, `,"rate":`...)
-	buf = appendJSONFloat(buf, b.Rate)
+	buf = AppendJSONFloat(buf, b.Rate)
 	buf = append(buf, `,"closed_at":`...)
 	buf = strconv.AppendUint(buf, b.ClosedAt, 10)
 	if x, ok := b.Ext.(exportedExt); ok {
@@ -130,16 +130,17 @@ func (e *Export) Close() error {
 	return err
 }
 
-func appendJSONString(dst []byte, s string) []byte {
+// AppendJSONString appends s as a JSON string.
+func AppendJSONString(dst []byte, s string) []byte {
 	// Marshalling a string cannot fail.
 	q, _ := json.Marshal(s)
 	return append(dst, q...)
 }
 
-// appendJSONFloat writes the shortest form that reads back to the same bits.
+// AppendJSONFloat writes the shortest form that reads back to the same bits.
 // The exposition format allows NaN and ±Inf, which JSON has no number for;
 // they use the tokens Python's json module reads.
-func appendJSONFloat(dst []byte, v float64) []byte {
+func AppendJSONFloat(dst []byte, v float64) []byte {
 	switch {
 	case math.IsNaN(v):
 		return append(dst, "NaN"...)

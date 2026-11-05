@@ -203,6 +203,7 @@ func sampleState() *State {
 			LatenessMs:  2000,
 			IdleGraceMs: 5000,
 			Marks:       []ingest.Mark{{Tenant: "b", MaxTs: 99}, {Tenant: "a", MaxTs: -1}},
+			Lease:       wal.Lease{Epoch: 7, Holder: "e2", ExpiresMs: 1234},
 			Tenants:     []ingest.Stats{{Tenant: "a", Received: 10, Accepted: 8, Late: 1}, {Tenant: "zz"}},
 		},
 		Buckets: []agg.OpenBucket{
@@ -211,6 +212,7 @@ func sampleState() *State {
 			{Tenant: "b", Series: `{app="x"}`, Kind: event.KindLogs, End: 3000, Count: 7},
 		},
 		SketchErrorMax: 0.0099,
+		Extra:          []byte{9, 8, 7},
 	}
 	st.Snapshot.Tenants[0].Dropped[ingest.CauseQuota] = 2
 	return st
@@ -239,6 +241,12 @@ func TestRoundTripIsExact(t *testing.T) {
 	}
 	if got.SketchErrorMax != st.SketchErrorMax {
 		t.Errorf("sketch error max = %v, want %v", got.SketchErrorMax, st.SketchErrorMax)
+	}
+	if got.Snapshot.Lease != st.Snapshot.Lease {
+		t.Errorf("lease = %+v, want %+v", got.Snapshot.Lease, st.Snapshot.Lease)
+	}
+	if !bytes.Equal(got.Extra, st.Extra) {
+		t.Errorf("extra = %v, want %v", got.Extra, st.Extra)
 	}
 	if string(data[:8]) != "OTCKPT01" {
 		t.Errorf("magic = %q", data[:8])

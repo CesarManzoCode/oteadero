@@ -60,6 +60,7 @@ type delivery struct {
 	stats *Stats
 	batch *CommittedBatch
 	tick  *TickEffect
+	lease *leaseEntry
 }
 
 // Sequencer is the single writer of the log (D03). It is a synchronous
@@ -84,6 +85,7 @@ type Sequencer struct {
 	active  []*tenant // DRR round: tenants with a non-empty queue
 	cur     int
 	closing bool
+	leases  []*leaseEntry
 	// delivered is each tenant's watermark as of what reached the sink.
 	delivered map[string]int64
 
@@ -100,6 +102,7 @@ type Sequencer struct {
 	ckptEvents    uint64
 	ckptAt        time.Duration
 	ckptNext      uint64
+	lease         wal.Lease
 }
 
 // New returns a sequencer that appends to log, which must be open and
@@ -159,7 +162,7 @@ func (s *Sequencer) Shutdown() {
 func (s *Sequencer) Drained() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.closing && len(s.active) == 0 && len(s.pending) == 0
+	return s.closing && len(s.active) == 0 && len(s.leases) == 0 && len(s.pending) == 0
 }
 
 // Poll does the work that is due now: it appends queued batches in DRR
@@ -170,6 +173,9 @@ func (s *Sequencer) Drained() bool {
 func (s *Sequencer) Poll() error {
 	if s.err != nil {
 		return s.err
+	}
+	if err := s.writeLeases(); err != nil {
+		return s.fail(err)
 	}
 	for {
 		e := s.pick()
@@ -222,20 +228,13 @@ func (s *Sequencer) write(e *entry) error {
 // classify applies the §4.4 rules to b, whose first event has offset first.
 // Live writes and recovery replay both go through it.
 func (s *Sequencer) classify(b *event.Batch, first uint64) *CommittedBatch {
-	late, wm, nLate := s.wm.apply(b)
-	return &CommittedBatch{
-		Batch:       b,
-		FirstOffset: first,
-		Late:        late,
-		Watermark:   wm,
-		LateCount:   nLate,
-	}
+	return s.wm.classify(b, first)
 }
 
 // applyTick applies a TICK at server time tsMs, followed by the event with
 // offset next. Live writes and recovery replay both go through it.
 func (s *Sequencer) applyTick(tsMs int64, next uint64) *TickEffect {
-	return &TickEffect{TsMs: tsMs, NextOffset: next, Advances: s.wm.tick(tsMs)}
+	return s.wm.applyTick(tsMs, next)
 }
 
 // maybeTick appends a TICK when some tenant with a defined watermark has
@@ -280,15 +279,18 @@ func (s *Sequencer) commit() error {
 func (s *Sequencer) deliver(ds []delivery) {
 	s.mu.Lock()
 	for _, d := range ds {
-		if d.batch != nil {
+		switch {
+		case d.batch != nil:
 			d.stats.Late += uint64(d.batch.LateCount)
 			if n := len(d.batch.Watermark); n > 0 {
 				s.delivered[d.batch.Batch.Tenant] = d.batch.Watermark[n-1]
 			}
-		} else {
+		case d.tick != nil:
 			for _, adv := range d.tick.Advances {
 				s.delivered[adv.Tenant] = adv.Watermark
 			}
+		default:
+			s.lease = d.lease.lease
 		}
 	}
 	s.mu.Unlock()
@@ -296,11 +298,15 @@ func (s *Sequencer) deliver(ds []delivery) {
 		if d.e != nil && d.e.ack != nil {
 			d.e.ack(Ack{FirstOffset: d.batch.FirstOffset, Events: int(d.e.n)})
 		}
+		if d.lease != nil {
+			d.lease.done(nil)
+		}
 	}
 	for _, d := range ds {
-		if d.batch != nil {
+		switch {
+		case d.batch != nil:
 			s.sink.Batch(d.batch)
-		} else {
+		case d.tick != nil:
 			s.sink.Tick(d.tick)
 		}
 	}
@@ -321,6 +327,8 @@ func (s *Sequencer) fail(err error) error {
 		t.inTurn = false
 	}
 	s.active = nil
+	leases := s.leases
+	s.leases = nil
 	s.mu.Unlock()
 	ds := s.pending
 	s.pending = nil
@@ -328,6 +336,12 @@ func (s *Sequencer) fail(err error) error {
 		if d.e != nil && d.e.ack != nil {
 			d.e.ack(Ack{Events: int(d.e.n), Err: err})
 		}
+		if d.lease != nil {
+			d.lease.done(err)
+		}
+	}
+	for _, l := range leases {
+		l.done(err)
 	}
 	for _, e := range queued {
 		if e.ack != nil {
@@ -346,7 +360,7 @@ func (s *Sequencer) NextWake() (d time.Duration, ok bool) {
 		return 0, false
 	}
 	s.mu.Lock()
-	busy, closing := len(s.active) > 0, s.closing
+	busy, closing := len(s.active) > 0 || len(s.leases) > 0, s.closing
 	s.mu.Unlock()
 	if busy || (closing && len(s.pending) > 0) {
 		return 0, true

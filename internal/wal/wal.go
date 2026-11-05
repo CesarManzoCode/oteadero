@@ -22,33 +22,33 @@ var (
 
 // readRecord reads the record starting at off of a file holding size bytes.
 // The payload aliases buf, which is grown as needed and returned.
-func readRecord(f vfs.File, off, size int64, buf []byte) (typ byte, payload []byte, end int64, nbuf []byte, err error) {
+func readRecord(f vfs.File, off, size int64, buf []byte) (typ byte, payload []byte, end int64, crc uint32, nbuf []byte, err error) {
 	if size-off < frameSize {
-		return 0, nil, 0, buf, errIncomplete
+		return 0, nil, 0, 0, buf, errIncomplete
 	}
 	var frame [frameSize]byte
 	if _, err := f.ReadAt(frame[:], off); err != nil {
-		return 0, nil, 0, buf, err
+		return 0, nil, 0, 0, buf, err
 	}
 	n := int64(binary.LittleEndian.Uint32(frame[:4]))
-	crc := binary.LittleEndian.Uint32(frame[4:])
+	crc = binary.LittleEndian.Uint32(frame[4:])
 	if n < 1 {
-		return 0, nil, 0, buf, errBadRecord
+		return 0, nil, 0, 0, buf, errBadRecord
 	}
 	if n > size-off-frameSize {
-		return 0, nil, 0, buf, errIncomplete
+		return 0, nil, 0, 0, buf, errIncomplete
 	}
 	if int64(cap(buf)) < n {
 		buf = make([]byte, n)
 	}
 	body := buf[:n]
 	if _, err := f.ReadAt(body, off+frameSize); err != nil {
-		return 0, nil, 0, buf, err
+		return 0, nil, 0, 0, buf, err
 	}
 	if crc32.ChecksumIEEE(body) != crc {
-		return 0, nil, 0, buf, errBadRecord
+		return 0, nil, 0, 0, buf, errBadRecord
 	}
-	return body[0], body[1:], off + frameSize + n, buf, nil
+	return body[0], body[1:], off + frameSize + n, crc, buf, nil
 }
 
 // recordEvents returns how many offsets a record consumes.
@@ -81,7 +81,7 @@ func readSegmentHeader(f vfs.File) (uint64, error) {
 	var h [HeaderSize]byte
 	if _, err := f.ReadAt(h[:], 0); err != nil {
 		if err == io.EOF {
-			return 0, fmt.Errorf("%w: short segment header", ErrCorrupt)
+			return 0, fmt.Errorf("%w: %w", ErrCorrupt, ErrShortHeader)
 		}
 		return 0, err
 	}
@@ -230,7 +230,7 @@ func (l *Log) recoverLast(bases []uint64, rec *Recovery) error {
 		var typ byte
 		var payload []byte
 		var end int64
-		typ, payload, end, buf, err = readRecord(f, off, size, buf)
+		typ, payload, end, _, buf, err = readRecord(f, off, size, buf)
 		if errors.Is(err, errIncomplete) || errors.Is(err, errBadRecord) {
 			break
 		}
