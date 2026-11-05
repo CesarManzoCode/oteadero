@@ -4,6 +4,7 @@
 
 ### Added
 
+- Admisión y secuenciador de ingestión (§4.1, §4.3, §4.4, D03, D05): cuota por inquilino con token bucket y ráfaga, colas acotadas servidas con Deficit Round Robin ponderado, secuenciador único que asigna offsets, clasifica tardíos con el watermark por inquilino, escribe TICKs de inactividad y confirma cada lote solo tras el fsync del group commit (4 MiB o 2 ms); todo descarte se cuenta por inquilino y causa.
 - Modelo de eventos y parsers de ingestión (§4.1–§4.3): texto de exposición de Prometheus con timestamp obligatorio para métricas y NDJSON para logs, lote atómico que se rechaza entero (`invalid`, `too_large` por encima de 100 000 eventos), clave canónica de serie con escapes, hash FNV-1a de la identidad para los shards y codificación binaria del payload BATCH.
 - Log de entrada durable (§4.3): segmentos con CRC-32, rotación a 256 MiB, lectura desde una posición o un offset y recuperación que trunca el registro final roto; reloj, azar y disco inyectables, con un disco en memoria que simula caídas.
 - Fundación del proyecto: contrato con las decisiones de diseño, investigación con fuentes y versiones fijadas, límites declarados, comando de chequeo (`make check`) y CI que lo corre.
