@@ -1,5 +1,7 @@
+import os
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import lib
@@ -89,6 +91,32 @@ class CompareBucketsTest(unittest.TestCase):
         compared, diffs = self.compare([bucket(1000, series="a{}")], [bucket(1000, series="b{}")])
         self.assertEqual(compared, 2)
         self.assertEqual(len(diffs), 2)
+
+
+class RefBinaryTest(unittest.TestCase):
+    def executable(self, path):
+        path.write_text("#!/bin/sh\n")
+        path.chmod(0o755)
+        return path
+
+    def test_refbin_comes_before_path(self):
+        with tempfile.TemporaryDirectory() as refbin, tempfile.TemporaryDirectory() as bindir:
+            local = self.executable(Path(refbin) / "promtool")
+            self.executable(Path(bindir) / "promtool")
+            with mock.patch.dict(os.environ, {"PATH": bindir}):
+                self.assertEqual(lib.ref_binary("promtool", refbin), local)
+
+    def test_path_when_refbin_lacks_it(self):
+        with tempfile.TemporaryDirectory() as refbin, tempfile.TemporaryDirectory() as bindir:
+            found = self.executable(Path(bindir) / "promtool")
+            (Path(refbin) / "promtool").write_text("not executable")
+            with mock.patch.dict(os.environ, {"PATH": bindir}):
+                self.assertEqual(lib.ref_binary("promtool", refbin), found)
+
+    def test_missing_everywhere(self):
+        with tempfile.TemporaryDirectory() as refbin, tempfile.TemporaryDirectory() as bindir:
+            with mock.patch.dict(os.environ, {"PATH": bindir}):
+                self.assertIsNone(lib.ref_binary("promtool", refbin))
 
 
 class ExportFilesTest(unittest.TestCase):

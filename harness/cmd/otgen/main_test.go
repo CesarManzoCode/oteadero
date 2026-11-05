@@ -47,7 +47,7 @@ func sameBatches(a, b []batch) bool {
 	return true
 }
 
-var filledProfiles = []string{"basic", "late", "saturation", "fairness", "bench", "alerts"}
+var filledProfiles = []string{"basic", "late", "saturation", "fairness", "bench", "alerts", "reference", "reference-kff"}
 
 func TestSameSeedSameBytes(t *testing.T) {
 	for _, name := range filledProfiles {
@@ -340,6 +340,114 @@ func TestAlertsRealtime(t *testing.T) {
 
 // TestPacedProfilesDoNotWaitForAcks holds every answer until 8 batches of one
 // tenant arrived: with fewer connections the first ones never get their ack.
+// referenceSamples returns the samples of the whole load of a reference
+// profile, flush excluded.
+func referenceSamples(t *testing.T, name string) (profile, []event.Metric) {
+	t.Helper()
+	p, err := lookupProfile(name, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.tenants) != 1 || p.conns != 1 || p.delayed {
+		t.Fatalf("%s: %+v", name, p)
+	}
+	g := newGenerator(p, 0, 9, false)
+	var out []event.Metric
+	for !g.done() {
+		for _, b := range g.cycle() {
+			if b.logs {
+				t.Fatalf("%s generated logs", name)
+			}
+			parsed, err := event.ParseMetrics(nil, b.body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, parsed...)
+		}
+	}
+	return p, out
+}
+
+func TestReferenceLoad(t *testing.T) {
+	p, samples := referenceSamples(t, "reference")
+	if int64(len(samples)) != p.tenants[0].events {
+		t.Fatalf("%d samples, want %d", len(samples), p.tenants[0].events)
+	}
+	seen := map[string]bool{}
+	perService := map[string]int{}
+	var prev int64
+	for i, m := range samples {
+		if m.Value != math.Trunc(m.Value) || m.Value < 0 {
+			t.Fatalf("value %v is not a non-negative integer", m.Value)
+		}
+		if i > 0 && m.TsMs <= prev {
+			t.Fatalf("timestamp %d after %d: series could repeat one or turn late", m.TsMs, prev)
+		}
+		prev = m.TsMs
+		if !strings.HasPrefix(m.Key, "ref_events{") {
+			t.Fatalf("key %q", m.Key)
+		}
+		seen[m.Key] = true
+		_, svc, _ := strings.Cut(m.Key, `svc="`)
+		perService[svc]++
+	}
+	if len(seen) != len(referenceServices)*referenceInstances || len(perService) != len(referenceServices) {
+		t.Errorf("series %v", seen)
+	}
+	if samples[0].TsMs != syntheticBaseMs || prev != syntheticBaseMs+(referenceSeconds-1)*1000+990 {
+		t.Errorf("timestamps from %d to %d", samples[0].TsMs, prev)
+	}
+}
+
+func TestReferencePhases(t *testing.T) {
+	weights := map[int]int{}
+	for sec := range int64(referenceCycleS) {
+		total := 0
+		for i := range referenceServices {
+			w, _, span := referenceWeight(sec, i)
+			if span <= 0 {
+				t.Fatalf("empty value range at %d", sec)
+			}
+			weights[w]++
+			total += w
+		}
+		if total == 0 {
+			t.Fatalf("no service sends at second %d", sec)
+		}
+	}
+	for _, w := range []int{0, 2, 5, 6} {
+		if weights[w] == 0 {
+			t.Errorf("weight %d never used: %v", w, weights)
+		}
+	}
+}
+
+func TestReferenceKffIsRegularFromZero(t *testing.T) {
+	_, samples := referenceSamples(t, "reference-kff")
+	if len(samples) != kffSeries*kffSeconds {
+		t.Fatalf("%d samples", len(samples))
+	}
+	high, low := 0, 0
+	for i, m := range samples {
+		step := int64(i / kffSeries)
+		want := fmt.Sprintf(`kff_value{instance="i%d"}`, i%kffSeries)
+		if m.Key != want || m.TsMs != step*kffIntervalMs {
+			t.Fatalf("sample %d: %s at %d, want %s at %d", i, m.Key, m.TsMs, want, step*kffIntervalMs)
+		}
+		switch {
+		case m.Value >= 5 && m.Value <= 7:
+			high++
+		case m.Value == 0 || m.Value == 1:
+			low++
+		default:
+			t.Fatalf("value %v", m.Value)
+		}
+	}
+	if high == 0 || low == 0 {
+		t.Errorf("high %d, low %d", high, low)
+	}
+}
+
 func TestPacedProfilesDoNotWaitForAcks(t *testing.T) {
 	const inFlight = 8
 	for _, name := range []string{"saturation", "fairness"} {
@@ -556,6 +664,7 @@ func TestRunRejectsBadUsage(t *testing.T) {
 		{"--profile", "nope", "--seed", "1", "--report", report, "--sink", "null"},
 		{"--profile", "tail", "--seed", "1", "--report", report, "--sink", "null"},
 		{"--profile", "alerts", "--seed", "1", "--report", report, "--sink", "null", "--duration-s", "5"},
+		{"--profile", "reference", "--seed", "1", "--report", report, "--sink", "null", "--duration-s", "5"},
 		{"--profile", "basic", "--seed", "1", "--report", report, "--sink", "null", "--duration-s", "5"},
 	} {
 		if code := run(args, io.Discard); code != 2 {

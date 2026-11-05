@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import NamedTuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+# Where scripts/fetch_refs.py leaves the reference binaries (D24).
+REFBIN_DIR = REPO_ROOT / ".refbin"
 
 # Exit code of a criterion that lacks an external binary.
 SKIPPED = 77
@@ -64,6 +66,25 @@ def binary(name):
         check=True,
     )
     return path
+
+
+def ref_binary(name, refbin=None):
+    """Return the path of a reference binary in .refbin/ or else in PATH, or None."""
+    path = Path(refbin or REFBIN_DIR) / name
+    if path.is_file() and os.access(path, os.X_OK):
+        return path
+    found = shutil.which(name)
+    return Path(found) if found else None
+
+
+def ref_binaries(*names):
+    """Return the paths of the reference binaries; exit with 77 if one is missing."""
+    paths = [ref_binary(name) for name in names]
+    missing = [name for name, path in zip(names, paths) if path is None]
+    if missing:
+        print(f"faltan {', '.join(missing)} en .refbin/ y en PATH (make refs)")
+        sys.exit(SKIPPED)
+    return paths
 
 
 def work_dir(script):
@@ -294,7 +315,7 @@ class Evaluator:
             raise RuntimeError(f"evaluator {self.id} exited with {code}")
 
 
-def start_otgen(profile, seed, url, report, duration_s=None, realtime=False):
+def start_otgen(profile, seed, url, report, duration_s=None, realtime=False, vm=False):
     command = [
         binary("otgen"),
         "--profile",
@@ -310,6 +331,8 @@ def start_otgen(profile, seed, url, report, duration_s=None, realtime=False):
         command += ["--duration-s", str(duration_s)]
     if realtime:
         command.append("--realtime")
+    if vm:
+        command.append("--vm")
     return subprocess.Popen(command)
 
 
@@ -321,8 +344,8 @@ def wait_otgen(proc, report):
     return json.loads(Path(report).read_text())
 
 
-def run_otgen(profile, seed, url, report, duration_s=None):
-    return wait_otgen(start_otgen(profile, seed, url, report, duration_s), report)
+def run_otgen(profile, seed, url, report, duration_s=None, vm=False):
+    return wait_otgen(start_otgen(profile, seed, url, report, duration_s, vm=vm), report)
 
 
 def accepted_events(report):
@@ -345,17 +368,27 @@ def run_alerts(work, seed, settings=None, during_load=None):
     returns the truncate offset of section 4.8 for the evaluator export.
     Returns (engine, evaluator, truncate offset), all stopped.
     """
+    return run_evaluated(
+        work, "alerts", seed, ALERTS_RULES, alerts_tenants(), settings, during_load
+    )
+
+
+def run_evaluated(work, profile, seed, rules, tenant_config, settings=None, during_load=None):
+    """Run serve, otrecv and evaluator e1 with rules over a load until e1 read all of it.
+
+    Same arguments and result as run_alerts, for any profile and rules.
+    """
     report = work / "report.json"
     truncate_offset = 0
     with (
-        Serve(work, alerts_tenants(), **(settings or {})) as engine,
+        Serve(work, tenant_config, **(settings or {})) as engine,
         Receiver(work) as receiver,
-        Evaluator(work, engine, receiver) as evaluator,
+        Evaluator(work, engine, receiver, rules=rules) as evaluator,
     ):
         engine.start()
         receiver.start()
         evaluator.start()
-        load = start_otgen("alerts", seed, engine.url, report)
+        load = start_otgen(profile, seed, engine.url, report)
         try:
             if during_load is not None:
                 truncate_offset = during_load(engine, evaluator, load)
@@ -719,6 +752,15 @@ def compare_transitions(engine_runs, oracle_rows, truncate_offset=0):
         elif engine[key] != oracle[key]:
             diffs.append(f"different {key}: engine {engine[key]} oracle {oracle[key]}")
     return len(keys), diffs
+
+
+def evaluator_transitions(export_dir, evaluator_id, truncate_offset=0):
+    """Return (rule, group, T) -> state of an evaluator, joined with section 4.8, and the conflicts."""
+    runs = [
+        read_jsonl(run / "transitions.jsonl") for run in export_runs(export_dir, evaluator_id)
+    ]
+    merged, conflicts = union_exports(runs, truncate_offset, _eval_key, _transition_state)
+    return {k: row["state"] for k, row in merged.items()}, conflicts
 
 
 def check_transitions(export_dir, evaluator_id, oracle_rows, truncate_offset=0):

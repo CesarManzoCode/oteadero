@@ -50,6 +50,20 @@ const (
 	// alertsCycleS is the period of the phases of a service.
 	alertsCycleS = 120
 
+	// The reference profile: referenceEventsPerS integer samples per synthetic
+	// second, one every 10 ms so that no series has two at the same timestamp,
+	// over the services of referenceServices with referenceInstances each.
+	referenceEventsPerS = 100
+	referenceSeconds    = 300
+	referenceInstances  = 2
+	referenceCycleS     = 60
+	// The reference-kff profile: one sample of each of kffSeries series every
+	// kffIntervalMs from t = 0, the interval of rules/kff.json.
+	kffSeries     = 2
+	kffSeconds    = 240
+	kffIntervalMs = 1000
+	kffCycleS     = 40
+
 	// pacedConns is the connections per tenant of the profiles with a rate.
 	// A connection waits for the fsync of its batch, so with too few of them
 	// the acks, not the rate, would set what a tenant offers, and a load meant
@@ -90,6 +104,30 @@ type profile struct {
 	// scenario replaces the random series of the mixed profiles with the
 	// services and phases of the alerts profile.
 	scenario bool
+	// shape replaces them with the series of a reference profile.
+	shape refShape
+}
+
+// refShape is the load of a reference profile (D12).
+type refShape int
+
+const (
+	shapeNone refShape = iota
+	// shapeCounts is the reference profile: integer samples spread over each
+	// second, with service phases that move counts and sums across the
+	// thresholds of rules/reference.json.
+	shapeCounts
+	// shapeRegular is the reference-kff profile: regular series from t = 0,
+	// as promtool test rules writes them.
+	shapeRegular
+)
+
+// baseMs returns the synthetic time of the first step.
+func (p profile) baseMs() int64 {
+	if p.shape == shapeRegular {
+		return 0
+	}
+	return syntheticBaseMs
 }
 
 // lookupProfile returns the fixed parameters of a profile. durationS, when
@@ -171,7 +209,41 @@ func lookupProfile(name string, durationS float64) (profile, error) {
 			delayed:     true,
 			scenario:    true,
 		}, nil
-	case "tail", "reference":
+	case "reference":
+		if durationS > 0 {
+			return profile{}, fmt.Errorf("profile %q has a fixed event count, not a duration", name)
+		}
+		// Metrics only and one connection: the same bytes go to
+		// VictoriaMetrics, and batches in order leave no late event.
+		return profile{
+			name: name,
+			tenants: []tenantPlan{{
+				name:       "t1",
+				events:     referenceEventsPerS * referenceSeconds,
+				stepEvents: referenceEventsPerS,
+			}},
+			batchEvents: 1000,
+			conns:       1,
+			stepMs:      1000,
+			shape:       shapeCounts,
+		}, nil
+	case "reference-kff":
+		if durationS > 0 {
+			return profile{}, fmt.Errorf("profile %q has a fixed event count, not a duration", name)
+		}
+		return profile{
+			name: name,
+			tenants: []tenantPlan{{
+				name:       "t1",
+				events:     kffSeries * kffSeconds,
+				stepEvents: kffSeries,
+			}},
+			batchEvents: 1000,
+			conns:       1,
+			stepMs:      kffIntervalMs,
+			shape:       shapeRegular,
+		}, nil
+	case "tail":
 		return profile{}, fmt.Errorf("profile %q is declared but not filled yet", name)
 	}
 	return profile{}, fmt.Errorf("unknown profile %q", name)
@@ -223,8 +295,12 @@ func newGenerator(p profile, tenant int, seed uint64, realtime bool) *generator 
 		logHeads:   make([]string, p.logSeries),
 		free:       make(chan []byte, 2*p.conns+2),
 	}
-	if p.scenario {
+	switch {
+	case p.scenario:
 		g.metricKeys, g.logHeads = alertsKeys()
+		return g
+	case p.shape != shapeNone:
+		g.metricKeys, g.logHeads = referenceKeys(p.shape), nil
 		return g
 	}
 	for i := range g.metricKeys {
@@ -301,8 +377,8 @@ func (g *generator) cycle() []batch {
 		ts := now
 		sec := g.generated / g.plan.stepEvents
 		if !g.realtime {
-			ts = syntheticBaseMs + sec*g.p.stepMs
-			if g.p.scenario {
+			ts = g.p.baseMs() + sec*g.p.stepMs
+			if g.p.scenario || g.p.shape == shapeCounts {
 				// Spread the events of a step over it.
 				ts += g.generated % g.plan.stepEvents * g.p.stepMs / g.plan.stepEvents
 			}
@@ -315,7 +391,10 @@ func (g *generator) cycle() []batch {
 			}
 		}
 		g.maxTs = max(g.maxTs, ts)
-		if g.p.scenario {
+		if g.p.shape != shapeNone {
+			metrics = g.appendReference(metrics, sec, ts)
+			nMetrics++
+		} else if g.p.scenario {
 			var isLog bool
 			metrics, logs, isLog = g.appendScenario(metrics, logs, sec, ts)
 			if isLog {
@@ -479,6 +558,93 @@ func (g *generator) appendScenario(metrics, logs []byte, sec, ts int64) ([]byte,
 	metrics = append(metrics, ' ')
 	metrics = strconv.AppendInt(metrics, ts, 10)
 	return append(metrics, '\n'), logs, false
+}
+
+// referenceServices are the services of the reference profile; the shifts
+// keep their gaps apart.
+var referenceServices = [...]struct {
+	name  string
+	shift int64
+}{{"api", 0}, {"db", 20}, {"web", 40}}
+
+// referenceKeys returns the metric keys of a reference profile: ref_events of
+// every service and instance, or the kff_value series.
+func referenceKeys(shape refShape) []string {
+	var keys []string
+	if shape == shapeRegular {
+		for i := range kffSeries {
+			keys = append(keys, fmt.Sprintf("kff_value{instance=\"i%d\"} ", i))
+		}
+		return keys
+	}
+	for _, s := range referenceServices {
+		for i := range referenceInstances {
+			keys = append(keys, fmt.Sprintf("ref_events{instance=\"i%d\",svc=\"%s\"} ", i, s.name))
+		}
+	}
+	return keys
+}
+
+// referenceWeight returns the share of the events of a second that a service
+// of the reference profile gets and the range [min, min+span) of its values:
+// within each cycle of 60 s, 20 s normal, 12 s high, 12 s oscillating every
+// 2 s, a gap of 8 s without data and 8 s normal.
+func referenceWeight(sec int64, service int) (weight int, valueMin, valueSpan int64) {
+	p := (sec + referenceServices[service].shift) % referenceCycleS
+	switch {
+	case p >= 20 && p < 32:
+		return 6, 5, 10
+	case p >= 32 && p < 44:
+		if (p-32)/2%2 == 0 {
+			return 5, 4, 8
+		}
+		return 2, 1, 5
+	case p >= 44 && p < 52:
+		return 0, 0, 1
+	}
+	return 2, 1, 9
+}
+
+// kffValue returns the next value of a kff_value series at second sec: within
+// each cycle of 40 s, 15 s of 0 or 1, 10 s of 5 to 7 and 15 s alternating
+// between both every 4 s.
+func (g *generator) kffValue(sec int64, series int) int64 {
+	p := (sec + int64(series)*17) % kffCycleS
+	high := (p >= 15 && p < 25) || (p >= 25 && (p-25)/4%2 == 0)
+	if high {
+		return 5 + g.r.Int64N(3)
+	}
+	return g.r.Int64N(2)
+}
+
+// appendReference writes the next sample of a reference profile at second
+// sec: in reference-kff the next series in turn, in reference a service drawn
+// by the weights of its phase and one of its instances.
+func (g *generator) appendReference(b []byte, sec, ts int64) []byte {
+	var value int64
+	if g.p.shape == shapeRegular {
+		series := int(g.generated % g.plan.stepEvents)
+		b = append(b, g.metricKeys[series]...)
+		value = g.kffValue(sec, series)
+	} else {
+		var weights [len(referenceServices)]int
+		total := 0
+		for i := range referenceServices {
+			weights[i], _, _ = referenceWeight(sec, i)
+			total += weights[i]
+		}
+		service := 0
+		for pick := g.r.IntN(total); pick >= weights[service]; service++ {
+			pick -= weights[service]
+		}
+		_, valueMin, valueSpan := referenceWeight(sec, service)
+		b = append(b, g.metricKeys[service*referenceInstances+g.r.IntN(referenceInstances)]...)
+		value = valueMin + g.r.Int64N(valueSpan)
+	}
+	b = strconv.AppendInt(b, value, 10)
+	b = append(b, ' ')
+	b = strconv.AppendInt(b, ts, 10)
+	return append(b, '\n')
 }
 
 func (g *generator) lognormal() float64 {
