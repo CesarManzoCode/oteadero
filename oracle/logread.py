@@ -29,6 +29,7 @@ class Event(NamedTuple):
     series: str
     value: float  # 0.0 for logs
     ts_ms: int
+    fields: str = "{}"  # canonical fields of a log event; metrics have none
 
 
 class Tick(NamedTuple):
@@ -122,9 +123,12 @@ def _decode_batch(payload, first_offset):
             ts_ms = _I64.unpack_from(payload, pos)[0]
             value = 0.0
             series, pos = _read_bytes(payload, pos + _I64.size)
-            _, pos = _read_bytes(payload, pos)  # fields
+            fields, pos = _read_bytes(payload, pos)
             _, pos = _read_bytes(payload, pos)  # msg
-        events.append(Event(first_offset + i, tenant, kind, _text(series), value, ts_ms))
+        event = Event(first_offset + i, tenant, kind, _text(series), value, ts_ms)
+        if kind == KIND_LOGS:
+            event = event._replace(fields=_text(fields))
+        events.append(event)
     if pos != len(payload):
         raise _Invalid
     return events
@@ -154,3 +158,54 @@ def _read_bytes(buf, pos):
 def _text(raw):
     # surrogateescape keeps two series with different invalid UTF-8 apart.
     return raw.decode("utf-8", "surrogateescape")
+
+
+def parse_labels(text):
+    """Decode canonical labels of section 4.2, such as {a="1",b="2"}, into a dict."""
+    if not text.startswith("{") or not text.endswith("}"):
+        raise ValueError(f"not canonical labels: {text!r}")
+    labels = {}
+    pos = 1
+    end = len(text) - 1
+    while pos < end:
+        eq = text.index("=", pos)
+        name = text[pos:eq]
+        if text[eq + 1] != '"':
+            raise ValueError(f"not canonical labels: {text!r}")
+        pos = eq + 2
+        value = []
+        while text[pos] != '"':
+            char = text[pos]
+            if char == "\\":
+                pos += 1
+                char = {"\\": "\\", '"': '"', "n": "\n"}[text[pos]]
+            value.append(char)
+            pos += 1
+        labels[name] = "".join(value)
+        pos += 1
+        if pos < end:
+            if text[pos] != ",":
+                raise ValueError(f"not canonical labels: {text!r}")
+            pos += 1
+    return labels
+
+
+def format_labels(labels):
+    """Encode a dict as canonical labels of section 4.2: sorted by name in bytes."""
+    names = sorted(labels, key=_utf8)
+    parts = []
+    for name in names:
+        value = labels[name].replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+        parts.append(f'{name}="{value}"')
+    return "{" + ",".join(parts) + "}"
+
+
+def split_series(series):
+    """Return (metric name or None for logs, labels dict) of a canonical series key."""
+    brace = series.index("{")
+    name = series[:brace] if brace > 0 else None
+    return name, parse_labels(series[brace:])
+
+
+def _utf8(text):
+    return text.encode("utf-8", "surrogateescape")

@@ -4,7 +4,18 @@ import tempfile
 import unittest
 import zlib
 
-from logread import KIND_LOGS, KIND_METRICS, Event, Tick, _Invalid, read_log, read_uvarint
+from logread import (
+    KIND_LOGS,
+    KIND_METRICS,
+    Event,
+    Tick,
+    _Invalid,
+    format_labels,
+    parse_labels,
+    read_log,
+    read_uvarint,
+    split_series,
+)
 
 LOG_ID = bytes(range(1, 9))
 
@@ -120,7 +131,7 @@ class ReadLogTest(unittest.TestCase):
                 Event(0, "a", KIND_METRICS, 'm{x="1"}', 1.0, 10),
                 Event(1, "a", KIND_METRICS, 'm{x="2"}', 2.0, 20),
                 Tick(30),
-                Event(2, "b", KIND_LOGS, '{s="w"}', 0.0, 50),
+                Event(2, "b", KIND_LOGS, '{s="w"}', 0.0, 50, '{f="v"}'),
             ],
         )
 
@@ -230,6 +241,35 @@ class ReadUvarintTest(unittest.TestCase):
             with self.subTest(encoded):
                 with self.assertRaises((_Invalid, IndexError)):
                     read_uvarint(bytes.fromhex(encoded), 0)
+
+
+
+class LabelsTest(unittest.TestCase):
+    def test_round_trip_with_escapes(self):
+        labels = {"b": 'say "hi"\n', "a": "back\\slash", "c": ""}
+        text = format_labels(labels)
+        self.assertEqual(text, '{a="back\\\\slash",b="say \\"hi\\"\\n",c=""}')
+        self.assertEqual(parse_labels(text), labels)
+
+    def test_empty_labels(self):
+        self.assertEqual(format_labels({}), "{}")
+        self.assertEqual(parse_labels("{}"), {})
+
+    def test_value_with_comma_and_brace(self):
+        self.assertEqual(parse_labels('{a="x,y}",b="2"}'), {"a": "x,y}", "b": "2"})
+
+    def test_names_sort_by_bytes(self):
+        self.assertEqual(format_labels({"b": "1", "B": "2", "a": "3"}), '{B="2",a="3",b="1"}')
+
+    def test_split_series(self):
+        self.assertEqual(split_series('http{svc="api"}'), ("http", {"svc": "api"}))
+        self.assertEqual(split_series('{svc="api"}'), (None, {"svc": "api"}))
+
+    def test_malformed_labels(self):
+        for text in ("a=1", '{a=1}', '{a="1"b="2"}'):
+            with self.subTest(text):
+                with self.assertRaises(ValueError):
+                    parse_labels(text)
 
 
 if __name__ == "__main__":
