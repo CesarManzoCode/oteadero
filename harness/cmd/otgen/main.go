@@ -34,6 +34,12 @@ const (
 
 	logUsers = 10000
 
+	// pacedConns is the connections per tenant of the profiles with a rate.
+	// A connection waits for the fsync of its batch, so with too few of them
+	// the acks, not the rate, would set what a tenant offers, and a load meant
+	// to go over the quota could stay under it.
+	pacedConns = 8
+
 	// requestTimeout turns a stalled server into errors instead of a hang.
 	requestTimeout = 60 * time.Second
 	// errorBackoff stops a server that is down from burning the whole load
@@ -74,6 +80,7 @@ func lookupProfile(name string, durationS float64) (profile, error) {
 	paced := func(rates ...float64) profile {
 		p := mixed
 		p.batchEvents = 5000
+		p.conns = pacedConns
 		d := 30.0
 		if durationS > 0 {
 			d = durationS

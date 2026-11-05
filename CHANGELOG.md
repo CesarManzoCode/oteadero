@@ -14,6 +14,11 @@
 - Log de entrada durable (§4.3): segmentos con CRC-32, rotación a 256 MiB, lectura desde una posición o un offset y recuperación que trunca el registro final roto; reloj, azar y disco inyectables, con un disco en memoria que simula caídas.
 - Fundación del proyecto: contrato con las decisiones de diseño, investigación con fuentes y versiones fijadas, límites declarados, comando de chequeo (`make check`) y CI que lo corre.
 
+### Fixed
+
+- `CountDrop` creaba una segunda entrada de contadores para un inquilino configurado: `/metrics` repetía sus líneas y, al restaurar un checkpoint, esa entrada en cero borraba los contadores reales del inquilino.
+- Los perfiles `saturation` y `fairness` de `otgen` enviaban por una sola conexión por inquilino, que espera el fsync de cada lote: los acks, no la tasa, limitaban la carga, que podía quedar por debajo de la cuota. Ahora usan 8 conexiones por inquilino, de modo que `crit_accounting.py` y `crit_fairness.py` corren con el inquilino por encima de su cuota.
+
 ### Decisions
 
 - Motor en Go 1.27 sin dependencias externas; oráculo y scripts en Python 3.14 con biblioteca estándar.

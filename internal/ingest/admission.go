@@ -170,10 +170,7 @@ func (s *Sequencer) Submit(b *event.Batch, ack func(Ack)) (cause Cause, ok bool)
 func (s *Sequencer) CountDrop(tenantID string, n int, cause Cause) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st := s.unknownStats(tenantID)
-	if t := s.tenants[tenantID]; t != nil {
-		st = &t.stats
-	}
+	st := s.statsFor(tenantID)
 	st.Received += uint64(n)
 	st.Dropped[cause] += uint64(n)
 }

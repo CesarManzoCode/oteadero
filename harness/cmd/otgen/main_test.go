@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/CesarManzoCode/oteadero/internal/event"
 )
@@ -223,6 +224,46 @@ func TestProfileParameters(t *testing.T) {
 	}
 	if b := cycles(t, "bench", 1, 1); b[0].n != 10000 || b[0].logs {
 		t.Errorf("bench batch: n = %d, logs = %v", b[0].n, b[0].logs)
+	}
+}
+
+// TestPacedProfilesDoNotWaitForAcks holds every answer until 8 batches of one
+// tenant arrived: with fewer connections the first ones never get their ack.
+func TestPacedProfilesDoNotWaitForAcks(t *testing.T) {
+	const inFlight = 8
+	for _, name := range []string{"saturation", "fairness"} {
+		var arrived atomic.Int64
+		var stalled atomic.Bool
+		release := make(chan struct{})
+		var once sync.Once
+		open := func() { once.Do(func() { close(release) }) }
+		timer := time.AfterFunc(30*time.Second, func() {
+			stalled.Store(true)
+			open()
+		})
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			io.Copy(io.Discard, r.Body)
+			if arrived.Add(1) >= inFlight {
+				open()
+			}
+			<-release
+		}))
+
+		p, err := lookupProfile(name, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.tenants = p.tenants[:1]
+		p.tenants[0].events = inFlight * p.batchEvents
+		rep := runProfile(p, 1, false, newSender(srv.URL, false, false, p.conns))
+		timer.Stop()
+		srv.Close()
+		if stalled.Load() {
+			t.Errorf("%s: fewer than %d batches in flight", name, inFlight)
+		}
+		if r := rep.Tenants["t1"]; r.Acked != r.Sent || r.Errors != 0 {
+			t.Errorf("%s: report = %+v", name, r)
+		}
 	}
 }
 
