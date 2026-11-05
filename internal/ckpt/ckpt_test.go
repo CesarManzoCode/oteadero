@@ -872,3 +872,49 @@ func TestSketchConfigChangeFailsRecovery(t *testing.T) {
 		t.Fatal("recovered open buckets under another cardinality_fields")
 	}
 }
+
+func TestPinnedSegmentsAreKept(t *testing.T) {
+	mem := vfs.NewMem()
+	clk := clock.NewManual(base)
+	pin := uint64(0)
+	opts := Options{RetainEvents: 1, Pinned: func() (uint64, bool) { return pin, true }}
+	n := start(t, setup{fsys: mem, clk: clk, shards: 2, segment: 512, opts: opts})
+	send := func(round int) {
+		for i := range 20 {
+			at := base + int64(round)*20_000 + int64(i)*1000
+			n.send(sampleBatch("a", at, at))
+		}
+		n.barrier()
+	}
+	for round := range 4 {
+		send(round)
+	}
+	bases, err := wal.Segments(mem, logDir)
+	if err != nil || bases[0] != 0 {
+		t.Fatalf("pinned log starts at %v, %v", bases, err)
+	}
+
+	// Once the reader moves on, the segments before it may go, and only those.
+	pin = bases[2]
+	send(4)
+	if bases, err = wal.Segments(mem, logDir); err != nil || bases[0] != pin {
+		t.Fatalf("log pinned at %d starts at %v, %v", pin, bases, err)
+	}
+}
+
+func TestExtraStateRoundTrip(t *testing.T) {
+	mem := vfs.NewMem()
+	clk := clock.NewManual(base)
+	opts := Options{Extra: func() []byte { return []byte("live") }}
+	n := start(t, setup{fsys: mem, clk: clk, shards: 2, opts: opts})
+	n.send(sampleBatch("a", base, base))
+	n.barrier()
+
+	var got []byte
+	restored := 0
+	opts = Options{RestoreExtra: func(b []byte) error { restored++; got = b; return nil }}
+	m := start(t, setup{fsys: mem, clk: clk, shards: 2, opts: opts})
+	if !m.rep.FromCheckpoint || restored != 1 || string(got) != "live" {
+		t.Fatalf("report %+v, restored %d times with %q", m.rep, restored, got)
+	}
+}

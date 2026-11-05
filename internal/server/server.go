@@ -1,7 +1,8 @@
 // Package server is `oteadero serve` without the process around it: it wires
 // the log, the sequencer, the aggregator and the checkpoints from the
-// configuration and serves the HTTP interface of §4.1 and §4.10. Handlers
-// read and parse in parallel; the single sequencer does the rest (D03).
+// configuration and serves the HTTP interface of §4.1, §4.9 and §4.10.
+// Handlers read and parse in parallel; the single sequencer does the rest
+// (D03).
 package server
 
 import (
@@ -23,6 +24,7 @@ import (
 	"github.com/CesarManzoCode/oteadero/internal/event"
 	"github.com/CesarManzoCode/oteadero/internal/ingest"
 	"github.com/CesarManzoCode/oteadero/internal/rng"
+	"github.com/CesarManzoCode/oteadero/internal/stream"
 	"github.com/CesarManzoCode/oteadero/internal/vfs"
 	"github.com/CesarManzoCode/oteadero/internal/wal"
 )
@@ -59,6 +61,8 @@ type Server struct {
 	coord     *eval.Coordinator
 	mgr       *ckpt.Manager
 	export    *agg.Export
+	tail      *stream.Tail
+	live      *stream.Live
 	ckptEvery time.Duration
 	ckptCount uint64
 	maxBody   int64
@@ -107,10 +111,17 @@ func New(cfg config.Config, d Deps) (*Server, error) {
 		a.Subscribe(export)
 		opts.Flush = export.Flush
 	}
-	l, opened, err := wal.Open(d.FS, filepath.Join(cfg.DataDir, "log"), d.Rand, wal.Options{SegmentBytes: cfg.SegmentBytes})
+	logDir := filepath.Join(cfg.DataDir, "log")
+	l, opened, err := wal.Open(d.FS, logDir, d.Rand, wal.Options{SegmentBytes: cfg.SegmentBytes})
 	if err != nil {
 		return nil, err
 	}
+	tail := stream.NewTail(d.FS, logDir, l.ID(), l.End(), uint64(cfg.TailMaxLagEvents))
+	live := stream.NewLive(l.ID(), stream.RingSize)
+	a.Subscribe(live)
+	opts.Pinned = tail.Pinned
+	opts.Extra = live.AppendState
+	opts.RestoreExtra = live.LoadState
 	seq, err := ingest.New(icfg, d.Clock, l, a)
 	if err != nil {
 		l.Close()
@@ -125,6 +136,8 @@ func New(cfg config.Config, d Deps) (*Server, error) {
 		coord:     eval.NewCoordinator(d.Clock, seq, cfg.LeaseTTLMs),
 		mgr:       ckpt.New(d.FS, cfg.DataDir, a, opts),
 		export:    export,
+		tail:      tail,
+		live:      live,
 		ckptEvery: time.Duration(cfg.CheckpointIntervalMs) * time.Millisecond,
 		ckptCount: uint64(cfg.CheckpointEvents),
 		maxBody:   cfg.MaxBodyBytes,
@@ -135,6 +148,8 @@ func New(cfg config.Config, d Deps) (*Server, error) {
 	s.mux.HandleFunc("POST /v1/metrics", func(w http.ResponseWriter, r *http.Request) { s.ingest(w, r, event.KindMetrics) })
 	s.mux.HandleFunc("POST /v1/logs", func(w http.ResponseWriter, r *http.Request) { s.ingest(w, r, event.KindLogs) })
 	s.mux.HandleFunc("POST /v1/lease", s.lease)
+	s.mux.Handle("GET /v1/tail", tail)
+	s.mux.Handle("GET /v1/live", live)
 	s.mux.HandleFunc("GET /metrics", s.metrics)
 	s.mux.HandleFunc("GET /healthz", s.healthz)
 	return s, nil
@@ -149,6 +164,7 @@ func (s *Server) Start() (Recovery, error) {
 	}
 	s.coord.Restore(s.seq.LastLease())
 	s.seq.SetCheckpointer(s.mgr, s.ckptEvery, s.ckptCount)
+	s.seq.SetSyncHook(s.tail.Synced)
 	rec := Recovery{NextOffset: s.log.NextOffset(), TruncatedBytes: s.opened.TruncatedBytes}
 	s.agg.Start()
 	go func() {
@@ -168,12 +184,15 @@ func (s *Server) Handler() http.Handler { return s.mux }
 func (s *Server) Done() <-chan struct{} { return s.done }
 
 // Drain stops admission, so that later batches get 503 shutting_down, and
-// returns once every admitted batch is synced and acked. Call it after
-// Start; it can be called again.
+// returns once every admitted batch is synced and acked. It also ends the
+// live streams, whose clients resume with their tokens, so that the HTTP
+// server can shut down. Call it after Start; it can be called again.
 func (s *Server) Drain() {
 	s.closing.Store(true)
 	s.seq.Shutdown()
 	<-s.done
+	s.tail.Close()
+	s.live.Close()
 }
 
 // Close drains, writes the final checkpoint and closes everything. Stop the
@@ -345,6 +364,7 @@ func (s *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 			line("oteadero_queue_depth_events", stats[i].QueuedEvents, event.Label{Name: "queue", Value: stats[i].Tenant})
 		}
 	}
+	line("oteadero_queue_depth_events", s.tail.Active()+s.live.Active(), event.Label{Name: "queue", Value: "tail"})
 	out.WriteString("# TYPE oteadero_sketch_observed_rel_error_max gauge\n")
 	fmt.Fprintf(&out, "oteadero_sketch_observed_rel_error_max %v\n", s.agg.SketchErrorMax())
 

@@ -26,6 +26,9 @@ Fuente única de lo que el proyecto no demuestra. Ningún otro archivo repite es
 - `oteadero_notifications_total` empieza en cero con cada arranque del evaluador; no está en el checkpoint.
 - En el cuerpo de una notificación, un valor NaN o ±Inf va como `null`, igual que el de un grupo ausente.
 - Si se pierde un LEASE ya confirmado, como al truncar a mano el último registro del log, la época puede retroceder y dos evaluadores pueden creer que tienen la misma: las épocas valen mientras el log conserve lo sincronizado.
+- Un suscriptor de `/v1/tail` cuyo cliente no lee queda bloqueado en la escritura: el corte `lagged` solo se decide entre registros, así que no le llega hasta que la escritura avanza, y mientras tanto su segmento sigue fijado frente a la limpieza del log.
+- Tras un reinicio de `serve`, el anillo de `/v1/live` solo tiene lo que la reproducción desde el checkpoint vuelve a cerrar: un token anterior a ese punto da `expired`, aunque esté entre las últimas 100 000 emisiones.
+- Al cerrar `serve`, los streams terminan sin evento final; el cliente reanuda con su último token.
 - No hay trazas; solo métricas (contadores delta y gauges) y logs estructurados.
 - La interfaz es HTTP/1.1 con texto de Prometheus y NDJSON. No se implementa gRPC, remote write de Prometheus ni OTLP, y no se demuestra "millones de usuarios".
 - No se demuestran Terraform, Ansible, infraestructura inmutable, el borde TypeScript/GraphQL ni operar ClickHouse o VictoriaMetrics a escala; estos dos solo se usan como referencia.

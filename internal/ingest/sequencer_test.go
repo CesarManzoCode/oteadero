@@ -772,3 +772,23 @@ func TestWatermarkFollowsCommits(t *testing.T) {
 		t.Fatalf("after Restore: %d, %v", got, ok)
 	}
 }
+
+func TestSyncHookSeesDurableEndBeforeAck(t *testing.T) {
+	f := newFixture(t, config(open("a")))
+	var seen []wal.Pos
+	var box *ackBox
+	f.seq.SetSyncHook(func(p wal.Pos) {
+		if box != nil && box.calls != 0 {
+			t.Errorf("hook ran after the ack")
+		}
+		seen = append(seen, p)
+	})
+	box = f.submit(metrics("a", t0, t0))
+	f.flush()
+	if box.calls != 1 {
+		t.Fatalf("acks = %d", box.calls)
+	}
+	if len(seen) != 1 || seen[0].Next != 2 || seen[0] != f.seq.log.End() {
+		t.Fatalf("hook saw %+v, log end %+v", seen, f.seq.log.End())
+	}
+}

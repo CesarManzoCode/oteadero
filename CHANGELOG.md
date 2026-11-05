@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Streams en vivo (§4.9, D05, D11): `GET /v1/tail?tenant=&kind=logs|metrics[&match=k=v,...]` sirve por SSE los eventos del log leídos desde disco hasta lo sincronizado, con `id: <logid>-<offset>`, `"o"` en cada evento y reanudación por `Last-Event-ID` o `?after=` en el siguiente offset que cumple el filtro; `GET /v1/live?tenant=` sirve las cubetas cerradas con `id: <logid>-m<seq>`, `seq` por inquilino guardado en el checkpoint y reanudación dentro de las últimas 100 000 emisiones; ambos responden `410` `unknown_log` o `expired`, cortan con `event: error` `lagged` al suscriptor que se queda atrás, despiertan tras cada fsync o cierre de cubetas sin sondeo, la limpieza de segmentos no borra los que un suscriptor del tail está leyendo y `oteadero_queue_depth_events{queue="tail"}` cuenta los suscriptores conectados de ambos.
+
 ## [k2] - 2026-11-05
 
 Cuantiles y cardinalidad con cota publicada, reglas de alerta, evaluador replicado con notificación única efectiva y comparación con promtool, vmalert y vmalert-tool.

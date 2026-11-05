@@ -97,3 +97,12 @@ func TestExportSpillsLargeBuffer(t *testing.T) {
 		t.Fatal("a full buffer was not written")
 	}
 }
+
+func TestAppendBucketJSON(t *testing.T) {
+	b := &Bucket{Tenant: "a", Series: `m{k="v"}`, End: 2000, Count: 3, Sum: 1.5, Rate: 1.5, ClosedAt: 7}
+	got := string(AppendBucketJSON([]byte("x"), b))
+	want := `x{"tenant":"a","series":"m{k=\"v\"}","end":2000,"count":3,"sum":1.5,"rate":1.5,"closed_at":7}`
+	if got != want {
+		t.Fatalf("got %s, want %s", got, want)
+	}
+}

@@ -103,6 +103,7 @@ type Sequencer struct {
 	ckptAt        time.Duration
 	ckptNext      uint64
 	lease         wal.Lease
+	onSync        func(wal.Pos)
 }
 
 // New returns a sequencer that appends to log, which must be open and
@@ -261,11 +262,20 @@ func (s *Sequencer) maybeTick() error {
 	return nil
 }
 
+// SetSyncHook makes every successful fsync of the log call fn with the
+// position right after the last durable record, before anything is acked or
+// delivered. It runs on the Poll goroutine and must not block. Call it before
+// Poll or Run.
+func (s *Sequencer) SetSyncHook(fn func(wal.Pos)) { s.onSync = fn }
+
 // commit syncs the log, then acks the producers and then hands everything
 // pending to the sink, in log order.
 func (s *Sequencer) commit() error {
 	if err := s.log.Sync(); err != nil {
 		return err
+	}
+	if s.onSync != nil {
+		s.onSync(s.log.End())
 	}
 	ds := s.pending
 	s.pending = nil

@@ -58,7 +58,14 @@ func NewExport(fsys vfs.FS, dir, runID string) (*Export, error) {
 
 // Closed implements Subscriber.
 func (e *Export) Closed(b *Bucket) {
-	buf := append(e.buckets.buf, `{"tenant":`...)
+	e.buckets.buf = append(AppendBucketJSON(e.buckets.buf, b), '\n')
+	e.spill(&e.buckets)
+}
+
+// AppendBucketJSON appends the JSON object of a closed bucket, the line of
+// buckets.jsonl of §4.8 without its newline.
+func AppendBucketJSON(dst []byte, b *Bucket) []byte {
+	buf := append(dst, `{"tenant":`...)
 	buf = AppendJSONString(buf, b.Tenant)
 	buf = append(buf, `,"series":`...)
 	buf = AppendJSONString(buf, b.Series)
@@ -75,8 +82,7 @@ func (e *Export) Closed(b *Bucket) {
 	if x, ok := b.Ext.(exportedExt); ok {
 		buf = x.appendExport(buf)
 	}
-	e.buckets.buf = append(buf, '}', '\n')
-	e.spill(&e.buckets)
+	return append(buf, '}')
 }
 
 // Late implements Subscriber.

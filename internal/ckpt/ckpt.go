@@ -38,6 +38,13 @@ type Options struct {
 	Flush func() error
 	// RetainEvents is the tail retention; zero means DefaultRetainEvents.
 	RetainEvents uint64
+	// Pinned, if set, returns the lowest segment a live reader is still
+	// reading; no segment from it on is removed while ok is true.
+	Pinned func() (segment uint64, ok bool)
+	// Extra, if set, returns the opaque state stored in State.Extra, read
+	// after the shards' barrier; RestoreExtra loads it back in Recover.
+	Extra        func() []byte
+	RestoreExtra func([]byte) error
 }
 
 // Manager writes checkpoints under <data>/ckpt/, removes what they make
@@ -50,6 +57,9 @@ type Manager struct {
 	agg     *agg.Aggregator
 	flush   func() error
 	retain  uint64
+	pinned  func() (uint64, bool)
+	extra   func() []byte
+	restore func([]byte) error
 	dirMade bool
 }
 
@@ -61,13 +71,16 @@ func New(fsys vfs.FS, data string, a *agg.Aggregator, opts Options) *Manager {
 		opts.RetainEvents = DefaultRetainEvents
 	}
 	return &Manager{
-		fsys:   fsys,
-		data:   data,
-		dir:    filepath.Join(data, "ckpt"),
-		logDir: filepath.Join(data, "log"),
-		agg:    a,
-		flush:  opts.Flush,
-		retain: opts.RetainEvents,
+		fsys:    fsys,
+		data:    data,
+		dir:     filepath.Join(data, "ckpt"),
+		logDir:  filepath.Join(data, "log"),
+		agg:     a,
+		flush:   opts.Flush,
+		retain:  opts.RetainEvents,
+		pinned:  opts.Pinned,
+		extra:   opts.Extra,
+		restore: opts.RestoreExtra,
 	}
 }
 
@@ -112,7 +125,11 @@ func (m *Manager) Checkpoint(snap *ingest.Snapshot) error {
 			return err
 		}
 	}
-	if err := m.write(&State{Snapshot: *snap, Buckets: m.agg.OpenBuckets(), SketchErrorMax: m.agg.SketchErrorMax()}); err != nil {
+	st := &State{Snapshot: *snap, Buckets: m.agg.OpenBuckets(), SketchErrorMax: m.agg.SketchErrorMax()}
+	if m.extra != nil {
+		st.Extra = m.extra()
+	}
+	if err := m.write(st); err != nil {
 		return err
 	}
 	if err := m.prune(); err != nil {
@@ -225,7 +242,8 @@ func (m *Manager) prune() error {
 
 // removeSegments applies D05: a segment goes only if all of it comes before
 // the oldest checkpoint's position and outside the tail retention, counted
-// back from head. The last segment has no successor and always stays.
+// back from head, and no live reader is in it or before it. The last segment
+// has no successor and always stays.
 func (m *Manager) removeSegments(head uint64) error {
 	offsets, err := m.offsets()
 	if err != nil || len(offsets) == 0 {
@@ -247,10 +265,14 @@ func (m *Manager) removeSegments(head uint64) error {
 	if err != nil {
 		return err
 	}
+	pin, pinned := uint64(0), false
+	if m.pinned != nil {
+		pin, pinned = m.pinned()
+	}
 	removed := false
 	for i := 0; i+1 < len(bases); i++ {
 		next := bases[i+1]
-		if next > oldest.Snapshot.Pos.Segment || !m.outsideRetention(next, head) {
+		if next > oldest.Snapshot.Pos.Segment || !m.outsideRetention(next, head) || (pinned && next > pin) {
 			break
 		}
 		if err := wal.RemoveSegment(m.fsys, m.logDir, bases[i]); err != nil {
@@ -340,6 +362,11 @@ func (m *Manager) Recover(seq *ingest.Sequencer) (Report, error) {
 			return rep, err
 		}
 		m.agg.RestoreSketchErrorMax(st.SketchErrorMax)
+		if m.restore != nil {
+			if err := m.restore(st.Extra); err != nil {
+				return rep, err
+			}
+		}
 		rep.FromCheckpoint = true
 		rep.Offset = st.Snapshot.Pos.Next
 		return rep, m.replay(seq, r)
