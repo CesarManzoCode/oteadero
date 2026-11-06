@@ -155,17 +155,30 @@ func New(cfg config.Config, d Deps) (*Server, error) {
 	return s, nil
 }
 
-// Start recovers from the newest usable checkpoint and the log, then runs
-// the shards and the sequencer. After a failed Start the process should
-// exit: Close would checkpoint a state that was not fully recovered.
-func (s *Server) Start() (Recovery, error) {
+// Recover recovers from the newest usable checkpoint and the log and wires
+// the coordinator, the checkpoints and the tail to the sequencer, which it
+// leaves to the caller: Start runs it in its goroutine, and the simulation
+// calls Poll from its single thread (D03), with the aggregator inline. After a
+// failed Recover the process should exit: a checkpoint now would save a state
+// that was not fully recovered.
+func (s *Server) Recover() (Recovery, error) {
 	if _, err := s.mgr.Recover(s.seq); err != nil {
 		return Recovery{}, err
 	}
 	s.coord.Restore(s.seq.LastLease())
 	s.seq.SetCheckpointer(s.mgr, s.ckptEvery, s.ckptCount)
 	s.seq.SetSyncHook(s.tail.Synced)
-	rec := Recovery{NextOffset: s.log.NextOffset(), TruncatedBytes: s.opened.TruncatedBytes}
+	return Recovery{NextOffset: s.log.NextOffset(), TruncatedBytes: s.opened.TruncatedBytes}, nil
+}
+
+// Start recovers, then runs the shards and the sequencer in their
+// goroutines. After a failed Start the process should exit, as after a
+// failed Recover.
+func (s *Server) Start() (Recovery, error) {
+	rec, err := s.Recover()
+	if err != nil {
+		return rec, err
+	}
 	s.agg.Start()
 	go func() {
 		// A log error stops admission and acks everyone with it; Close
@@ -176,6 +189,12 @@ func (s *Server) Start() (Recovery, error) {
 	}()
 	return rec, nil
 }
+
+// Sequencer returns the sequencer, for a caller that drives it after Recover.
+func (s *Server) Sequencer() *ingest.Sequencer { return s.seq }
+
+// Coordinator returns the lease coordinator of D09.
+func (s *Server) Coordinator() *eval.Coordinator { return s.coord }
 
 // Handler returns the HTTP interface.
 func (s *Server) Handler() http.Handler { return s.mux }
@@ -211,34 +230,51 @@ func (s *Server) Close() error {
 // bodies recycles request buffers; no parsed event aliases its body.
 var bodies = sync.Pool{New: func() any { return new(bytes.Buffer) }}
 
-// ingest handles a batch of §4.1. Every outcome but the 200 and the log
-// failure is a whole-batch drop, counted before the response. A body that is
-// over the limit or cut short is counted by the lines that did arrive.
+// Reply is the answer to a batch of §4.1: the HTTP status and the JSON body,
+// without the final newline.
+type Reply struct {
+	Status int
+	Body   string
+}
+
+// ingest handles a batch of §4.1 over HTTP.
 func (s *Server) ingest(w http.ResponseWriter, r *http.Request, kind event.Kind) {
-	tenant := r.Header.Get(TenantHeader)
 	buf := bodies.Get().(*bytes.Buffer)
 	buf.Reset()
 	defer bodies.Put(buf)
 	_, err := buf.ReadFrom(http.MaxBytesReader(w, r.Body, s.maxBody))
-	body := buf.Bytes()
+	done := make(chan Reply, 1)
+	s.Ingest(r.Header.Get(TenantHeader), kind, buf.Bytes(), err, func(rep Reply) { done <- rep })
+	rep := <-done
+	writeJSON(w, rep.Status, "%s", rep.Body)
+}
 
+// Ingest takes a batch of §4.1 whose body was read with readErr and answers it
+// through reply exactly once: at once for a drop, and from the sequencer after
+// the fsync for an admitted batch. reply must not block. Every outcome but the
+// 200 and the log failure is a whole-batch drop, counted before the reply. A
+// body that is over the limit or cut short is counted by the lines that did
+// arrive. The HTTP handlers use it, and so does the simulation, which delivers
+// bodies as messages.
+func (s *Server) Ingest(tenant string, kind event.Kind, body []byte, readErr error, reply func(Reply)) {
 	var tooBig *http.MaxBytesError
 	switch {
 	case !s.known[tenant]:
-		s.drop(w, tenant, kind, body, ingest.CauseUnknownTenant)
+		reply(s.drop(tenant, kind, body, ingest.CauseUnknownTenant))
 		return
 	case s.closing.Load():
-		s.drop(w, tenant, kind, body, ingest.CauseShuttingDown)
+		reply(s.drop(tenant, kind, body, ingest.CauseShuttingDown))
 		return
-	case errors.As(err, &tooBig):
-		s.drop(w, tenant, kind, body, ingest.CauseTooLarge)
+	case errors.As(readErr, &tooBig):
+		reply(s.drop(tenant, kind, body, ingest.CauseTooLarge))
 		return
-	case err != nil:
-		s.drop(w, tenant, kind, body, ingest.CauseInvalid)
+	case readErr != nil:
+		reply(s.drop(tenant, kind, body, ingest.CauseInvalid))
 		return
 	}
 
 	b := &event.Batch{Tenant: tenant, Kind: kind}
+	var err error
 	if kind == event.KindLogs {
 		b.Logs, err = event.ParseLogs(nil, body)
 	} else {
@@ -246,35 +282,34 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request, kind event.Kind)
 	}
 	switch {
 	case errors.Is(err, event.ErrTooLarge):
-		s.drop(w, tenant, kind, body, ingest.CauseTooLarge)
+		reply(s.drop(tenant, kind, body, ingest.CauseTooLarge))
 		return
 	case err != nil:
-		s.drop(w, tenant, kind, body, ingest.CauseInvalid)
+		reply(s.drop(tenant, kind, body, ingest.CauseInvalid))
 		return
 	}
 
 	n := b.Len()
-	ack := make(chan ingest.Ack, 1)
-	if cause, ok := s.seq.Submit(b, func(a ingest.Ack) { ack <- a }); !ok {
-		writeDrop(w, n, cause)
-		return
+	cause, ok := s.seq.Submit(b, func(a ingest.Ack) {
+		if a.Err != nil {
+			reply(Reply{Status: http.StatusInternalServerError, Body: `{"error":"log_failure"}`})
+			return
+		}
+		reply(Reply{Status: http.StatusOK, Body: fmt.Sprintf(`{"accepted":%d,"first_offset":%d}`, a.Events, a.FirstOffset)})
+	})
+	if !ok {
+		reply(dropReply(n, cause))
 	}
-	a := <-ack
-	if a.Err != nil {
-		writeJSON(w, http.StatusInternalServerError, `{"error":"log_failure"}`)
-		return
-	}
-	writeJSON(w, http.StatusOK, `{"accepted":%d,"first_offset":%d}`, a.Events, a.FirstOffset)
 }
 
-// drop counts a batch that never reached Submit and answers it.
-func (s *Server) drop(w http.ResponseWriter, tenant string, kind event.Kind, body []byte, cause ingest.Cause) {
+// drop counts a batch that never reached Submit and returns its answer.
+func (s *Server) drop(tenant string, kind event.Kind, body []byte, cause ingest.Cause) Reply {
 	n := event.CountEvents(kind, body)
 	s.seq.CountDrop(tenant, n, cause)
-	writeDrop(w, n, cause)
+	return dropReply(n, cause)
 }
 
-func writeDrop(w http.ResponseWriter, n int, cause ingest.Cause) {
+func dropReply(n int, cause ingest.Cause) Reply {
 	status := http.StatusBadRequest
 	switch cause {
 	case ingest.CauseQuota, ingest.CauseQueueFull:
@@ -282,7 +317,7 @@ func writeDrop(w http.ResponseWriter, n int, cause ingest.Cause) {
 	case ingest.CauseShuttingDown:
 		status = http.StatusServiceUnavailable
 	}
-	writeJSON(w, status, `{"dropped":%d,"cause":"%s"}`, n, cause)
+	return Reply{Status: status, Body: fmt.Sprintf(`{"dropped":%d,"cause":"%s"}`, n, cause)}
 }
 
 func writeJSON(w http.ResponseWriter, status int, format string, args ...any) {

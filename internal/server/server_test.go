@@ -224,7 +224,7 @@ func TestQuota(t *testing.T) {
 	)
 }
 
-func TestWriteDropStatus(t *testing.T) {
+func TestDropReplyStatus(t *testing.T) {
 	for cause, want := range map[ingest.Cause]int{
 		ingest.CauseQuota:         429,
 		ingest.CauseQueueFull:     429,
@@ -233,11 +233,10 @@ func TestWriteDropStatus(t *testing.T) {
 		ingest.CauseUnknownTenant: 400,
 		ingest.CauseShuttingDown:  503,
 	} {
-		rec := httptest.NewRecorder()
-		writeDrop(rec, 7, cause)
-		wantBody := fmt.Sprintf(`{"dropped":7,"cause":"%s"}`, cause) + "\n"
-		if rec.Code != want || rec.Body.String() != wantBody {
-			t.Errorf("%v: got %d %q", cause, rec.Code, rec.Body)
+		got := dropReply(7, cause)
+		wantBody := fmt.Sprintf(`{"dropped":7,"cause":"%s"}`, cause)
+		if got.Status != want || got.Body != wantBody {
+			t.Errorf("%v: got %d %q", cause, got.Status, got.Body)
 		}
 	}
 }
@@ -462,5 +461,40 @@ func TestLeaseEndpoint(t *testing.T) {
 	f.srv.Drain()
 	if code, _ := f.lease("e1"); code != 503 {
 		t.Errorf("while draining: %d", code)
+	}
+}
+
+// TestIngestInline drives the server on the caller's goroutine, as the
+// simulation does: a drop is answered at once, and an admitted batch when Poll
+// syncs it.
+func TestIngestInline(t *testing.T) {
+	srv, err := New(testConfig(), Deps{FS: vfs.NewMem(), Clock: clock.NewManual(t0), Rand: rng.New(1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	var got []Reply
+	reply := func(r Reply) { got = append(got, r) }
+	srv.Ingest("nobody", event.KindMetrics, []byte("m{} 1 1\n"), nil, reply)
+	if len(got) != 1 || got[0].Status != http.StatusBadRequest {
+		t.Fatalf("unknown tenant: %+v", got)
+	}
+	body := fmt.Appendf(nil, "m{} 1 %d\nm{} 2 %d\n", t0, t0)
+	srv.Ingest("a", event.KindMetrics, body, nil, reply)
+	if len(got) != 1 {
+		t.Fatalf("answered before the fsync: %+v", got)
+	}
+	if err := srv.Sequencer().Poll(); err != nil {
+		t.Fatal(err)
+	}
+	want := Reply{Status: http.StatusOK, Body: `{"accepted":2,"first_offset":0}`}
+	if len(got) != 2 || got[1] != want {
+		t.Fatalf("after Poll: %+v, want %+v last", got, want)
+	}
+	st := srv.Sequencer().Stats()
+	if st[0].Tenant != "a" || st[0].Accepted != 2 || st[0].Received != 2 {
+		t.Fatalf("stats: %+v", st[0])
 	}
 }
