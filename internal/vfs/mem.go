@@ -321,3 +321,126 @@ func (f *memFile) Close() error {
 	f.closed = true
 	return nil
 }
+
+// Synced returns a read-only view of the durable state of m: the entries made
+// durable by SyncDir, each with the contents of its last Sync. It is how
+// another process reads the disk of a node that may crash, as the evaluators
+// of the simulation read the log of serve. Its handles keep working across
+// Crash and see later syncs of the same file.
+func (m *Mem) Synced() FS { return syncedView{m} }
+
+type syncedView struct{ m *Mem }
+
+func readOnlyErr(op, name string) error {
+	return &fs.PathError{Op: op, Path: name, Err: fs.ErrPermission}
+}
+
+func (v syncedView) Create(name string) (File, error) { return nil, readOnlyErr("create", name) }
+
+func (v syncedView) OpenAppend(name string) (File, error) { return nil, readOnlyErr("open", name) }
+
+func (v syncedView) Open(name string) (File, error) {
+	name = path.Clean(name)
+	v.m.mu.Lock()
+	defer v.m.mu.Unlock()
+	ino, ok := v.m.durable[name]
+	if !ok {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
+	}
+	return &syncedFile{m: v.m, ino: ino, name: name}, nil
+}
+
+func (v syncedView) Rename(oldname, newname string) error { return readOnlyErr("rename", oldname) }
+
+func (v syncedView) Remove(name string) error { return readOnlyErr("remove", name) }
+
+func (v syncedView) ReadDir(dir string) ([]string, error) {
+	dir = path.Clean(dir)
+	v.m.mu.Lock()
+	defer v.m.mu.Unlock()
+	if !v.m.dirs[dir] {
+		return nil, &fs.PathError{Op: "readdir", Path: dir, Err: fs.ErrNotExist}
+	}
+	var names []string
+	for p := range v.m.durable {
+		if path.Dir(p) == dir {
+			names = append(names, path.Base(p))
+		}
+	}
+	for p := range v.m.dirs {
+		if p != dir && path.Dir(p) == dir {
+			names = append(names, path.Base(p))
+		}
+	}
+	slices.Sort(names)
+	return names, nil
+}
+
+func (v syncedView) MkdirAll(dir string) error { return readOnlyErr("mkdir", dir) }
+
+func (v syncedView) SyncDir(dir string) error { return readOnlyErr("syncdir", dir) }
+
+// syncedFile reads the durable prefix of an inode.
+type syncedFile struct {
+	m      *Mem
+	ino    *inode
+	name   string
+	closed bool
+}
+
+func (f *syncedFile) check(op string) error {
+	if f.closed {
+		return &fs.PathError{Op: op, Path: f.name, Err: fs.ErrClosed}
+	}
+	return nil
+}
+
+func (f *syncedFile) Write(p []byte) (int, error) { return 0, readOnlyErr("write", f.name) }
+
+func (f *syncedFile) ReadAt(p []byte, off int64) (int, error) {
+	f.m.mu.Lock()
+	defer f.m.mu.Unlock()
+	if err := f.check("read"); err != nil {
+		return 0, err
+	}
+	if off < 0 {
+		return 0, &fs.PathError{Op: "read", Path: f.name, Err: fs.ErrInvalid}
+	}
+	dur := f.ino.dur
+	if off >= int64(len(dur)) {
+		return 0, io.EOF
+	}
+	n := copy(p, dur[off:])
+	if n < len(p) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+// Sync has nothing to make durable, as on a read-only handle of Mem.
+func (f *syncedFile) Sync() error {
+	f.m.mu.Lock()
+	defer f.m.mu.Unlock()
+	return f.check("sync")
+}
+
+func (f *syncedFile) Truncate(size int64) error { return readOnlyErr("truncate", f.name) }
+
+func (f *syncedFile) Size() (int64, error) {
+	f.m.mu.Lock()
+	defer f.m.mu.Unlock()
+	if err := f.check("stat"); err != nil {
+		return 0, err
+	}
+	return int64(len(f.ino.dur)), nil
+}
+
+func (f *syncedFile) Close() error {
+	f.m.mu.Lock()
+	defer f.m.mu.Unlock()
+	if err := f.check("close"); err != nil {
+		return err
+	}
+	f.closed = true
+	return nil
+}

@@ -278,3 +278,52 @@ func TestMemCrashRevertsUnsyncedTruncate(t *testing.T) {
 		t.Fatalf("after synced truncate and crash = %q", got)
 	}
 }
+
+func TestMemSyncedView(t *testing.T) {
+	m := NewMem()
+	m.MkdirAll("d")
+	v := m.Synced()
+	f := durableFile(t, m, "d/f", "abc")
+	mustWrite(t, f, "def")
+	h, _ := m.Create("d/unlisted")
+	mustWrite(t, h, "1")
+	h.Sync()
+
+	if got := string(readAll(t, v, "d/f")); got != "abc" {
+		t.Fatalf("view shows %q, want only the synced prefix", got)
+	}
+	if names, _ := v.ReadDir("d"); !slices.Equal(names, []string{"f"}) {
+		t.Fatalf("view entries = %v, want only those made durable by SyncDir", names)
+	}
+	if _, err := v.Open("d/unlisted"); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("open of an entry without SyncDir: %v", err)
+	}
+
+	r, err := v.Open("d/f")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Sync()
+	if size, _ := r.Size(); size != 6 {
+		t.Fatalf("view handle size after sync = %d", size)
+	}
+	mustWrite(t, f, "lost")
+	mustWrite(t, f, "too")
+	m.Crash(rng.New(5))
+	if size, err := r.Size(); err != nil || size != 6 {
+		t.Fatalf("view handle after crash: size %d, err %v", size, err)
+	}
+
+	if _, err := v.Create("d/x"); !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("create on view: %v", err)
+	}
+	if _, err := v.OpenAppend("d/f"); !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("open for append on view: %v", err)
+	}
+	if _, err := r.Write([]byte("x")); !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("write on view handle: %v", err)
+	}
+	if err := v.Remove("d/f"); !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("remove on view: %v", err)
+	}
+}
