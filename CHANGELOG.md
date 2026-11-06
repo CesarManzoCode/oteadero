@@ -1,6 +1,8 @@
 # Changelog
 
-## [Unreleased]
+## [k3] - 2026-11-05
+
+Live tail y stream de cubetas con reanudación, métricas propias completas, simulación determinista con fallas, mutantes detectados y benchmark frente a VictoriaMetrics.
 
 ### Added
 
@@ -15,6 +17,14 @@
 ### Fixed
 
 - En el escenario de `otsim`, el suscriptor de tail no recibía ningún evento y el invariante `tail_offsets` fallaba en todas las semillas: sin token, `/v1/tail` empieza en el final durable (§4.9), y como cada conexión simulada es una sola petición con el contexto ya cancelado, la respuesta llegaba vacía y el suscriptor nunca obtenía un token. Ahora `serve` deja abierta una conexión sin token, con el token del último evento sincronizado al llegar, y la responde cuando el handler tiene algo después de él; si el log sincronizado no tiene eventos, la conexión termina vacía y el suscriptor se reconecta.
+
+### Decisions
+
+- Un mutante cuenta como detectado cuando alguno de sus criterios sale con algo distinto de 0 y 77, y `crit_mutants.py` exige antes que esos criterios pasen sobre el código sin mutar. M7 corre el barrido completo de semillas y `crit_split_brain.py` sobre él.
+- `crit_mutants.py` borra al terminar `.work/notify_once/` y `.work/sim_sweep/`, para que ningún otro criterio lea la corrida de un mutante.
+- `crit_bench.py` mide la tasa de `otgen` solo durante 10 s; esa cifra se imprime y no decide nada.
+- `otgen --profile tail` usa siempre el reloj, también sin `--realtime`.
+- El umbral de throughput sigue en 1 000 000 eventos/s (D14).
 
 ## [k2] - 2026-11-05
 

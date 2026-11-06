@@ -62,8 +62,17 @@ Fuente única de lo que el proyecto no demuestra. Ningún otro archivo repite es
 - `crit_alert_latency.py` reutiliza la corrida que encuentre en `.work/notify_once/` y solo lanza una nueva si no hay ninguna: no comprueba que esa corrida sea del código actual.
 - `crit_keep_firing_for.py` construye las alertas esperadas con las que el motor tenía en `firing` en cada instante. Prueba que promtool y vmalert-tool aceptan ese resultado, no los estados `pending`.
 - El log del cierre de K2 no registra las versiones ni los SHA-256 de los binarios de referencia que corrieron. Las versiones fijadas son las que verifica `scripts/fetch_refs.py`.
+- El cierre de K3 tampoco conservó la salida de los criterios, solo su veredicto. No hay cifras publicadas de throughput del motor o de VictoriaMetrics, cociente, memoria residente, hashes de la simulación, reanudaciones ni líneas de motor y arnés, ni constan sus versiones. Solo consta que cada cifra cumplía su cota.
+- `crit_slow_subscriber.py` pasa tanto con `lagged` como con contrapresión, y el cierre de K3 no registra cuál ocurrió, así que no consta que el corte `lagged` se haya ejercitado en esa corrida.
+- `crit_tail_resume.py`, `crit_slow_subscriber.py` y `crit_self_metrics.py` corren una sola semilla fija cada uno. Las desconexiones de `crit_tail_resume.py` caen todas dentro de los primeros 2000 eventos que recibe el suscriptor.
+- El barrido de `crit_sim_sweep.py` usa siempre las semillas 1 a 200: no explora otras, y volver a correrlo repite las mismas corridas.
+- Un mutante cuenta como detectado si alguno de sus criterios sale con algo distinto de 0 y 77. `crit_mutants.py` no comprueba que el fallo sea el del invariante que el mutante rompe, y no guarda la salida del criterio que lo detectó. Cubre solo los 8 mutantes de D17, cada uno con sus criterios fijos.
+- La detección de M8 depende de que `crit_accounting.py` llegue a la cuota. En una máquina ocupada por otra carga no hubo descartes por cuota y M8 sobrevivió, mientras la base seguía pasando ese script.
+- `crit_bench_rss.py` reutiliza `.work/bench/engine.json` y `crit_split_brain.py` reutiliza `.work/sim_sweep/` si los encuentran: no comprueban que sean del código actual.
 
 ## Rendimiento
 
 - Las cifras de rendimiento son de una máquina (Ryzen 5 5600G, 16 GB) y no se extrapolan.
 - La comparación con VictoriaMetrics es comparable, no equivalente: VictoriaMetrics guarda historial y confirma antes de persistir; oteadero confirma tras fsync y no guarda historial. La brecha es un costo, no un "más rápido".
+- El benchmark es una sola corrida de 60 s por destino, con una semilla fija. Mide `serve` solo: un inquilino, sin sketches, sin evaluadores, sin reglas y sin suscriptores de streams, con `idle_grace_ms` en 0. No dice cuánto sostiene el sistema completo con alertas y live tail.
+- `crit_bench.py` y `crit_bench_rss.py` no comprueban que la máquina esté libre, y la verificación del cierre de K3 no registra su carga. Con otra carga ocupando la máquina, `crit_bench.py` falló sobre el mismo código del motor con el que después pasó. Fijar núcleos con `taskset` no aísla de procesos ajenos que usan esos núcleos.

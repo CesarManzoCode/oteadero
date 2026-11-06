@@ -26,7 +26,7 @@ make criteria   # todos los criterios mecánicos; 77 = omitido por falta de bina
 - VictoriaMetrics: v1.155.0 (`victoria-metrics-prod`, de `make refs` o del `PATH`) en los mismos núcleos, con la misma carga enviada por `otgen --vm` a `/api/v1/import/prometheus`. Sin ese binario el script imprime solo el resultado del motor y sale con 77.
 - El script imprime la CPU (`/proc/cpuinfo`), la versión de `oteadero version`, la de `go version` y la del kernel. La conclusión permitida es la de D18: comparable, no equivalente.
 
-Requisitos: Go 1.27, Python 3.14, `taskset` y una máquina con al menos 12 CPUs lógicas. Las cifras se publican en Resultados al cerrar K3, con la salida medida.
+Requisitos: Go 1.27, Python 3.14, `taskset` y una máquina con al menos 12 CPUs lógicas. Los veredictos del cierre están en Resultados.
 
 ## Estado
 
@@ -35,7 +35,7 @@ Requisitos: Go 1.27, Python 3.14, `taskset` y una máquina con al menos 12 CPUs 
 | K0 | Fundación: contrato, investigación, comando de chequeo | terminada |
 | K1 | Ingestión durable, ventanas exactas y oráculo | Cerrada |
 | K2 | Sketches, alertas, evaluador replicado y comparación con vmalert y Prometheus | Cerrada |
-| K3 | Streams en vivo, simulación determinista, mutantes y rendimiento | pendiente |
+| K3 | Streams en vivo, simulación determinista, mutantes y rendimiento | Cerrada |
 
 ## Resultados
 
@@ -75,3 +75,25 @@ Veredictos de la verificación de cierre sobre el commit `57e10b5`. Una salida 7
 | `python3 scripts/crit_alert_latency.py` | p99 de latencia de notificación en la corrida con fallas | Pasa: p99 ≤ 8000 ms |
 
 Los criterios de K1 siguen pasando sobre el mismo commit.
+
+### K3
+
+Veredictos de la verificación de cierre sobre el commit `8edbcf2`. Cada resultado da la cota que el checker exige a la salida del script.
+
+| Comando | Criterio | Resultado |
+| --- | --- | --- |
+| `make check` | Formato, vet, tests unitarios y límite del oráculo | Salida 0: 19 paquetes Go en `ok`, 78 tests de `oracle/` y 135 de `scripts/` |
+| `python3 scripts/crit_tail_resume.py` | Offsets contiguos y sin repetidos tras reanudar con el token | Pasa: al menos 20 reanudaciones, 0 diferencias |
+| `python3 scripts/crit_slow_subscriber.py` | Un suscriptor lento recibe contrapresión o corte `lagged`, nunca un salto | Pasa: 0 diferencias de offsets |
+| `python3 scripts/crit_self_metrics.py` | Métricas propias iguales a generador y oráculo al final de una corrida | Pasa: 0 diferencias |
+| `python3 scripts/crit_sim_same_seed.py` | Dos simulaciones con la misma semilla dan el mismo hash | Pasa |
+| `python3 scripts/crit_sim_diff_seed.py` | Dos simulaciones con semillas distintas dan hashes distintos | Pasa |
+| `python3 scripts/crit_sim_sweep.py` | Semillas con fallas contra los invariantes y el oráculo | Pasa: 200 semillas, 0 fallidas |
+| `python3 scripts/crit_split_brain.py` | Notificaciones aceptadas de dos evaluadores en la misma época e incidente | Pasa: 0 violaciones |
+| `python3 scripts/crit_mutants.py` | Los 8 mutantes de D17 detectados y el código sin mutar pasa | Pasa: 8 de 8 detectados |
+| `python3 scripts/crit_bench.py` | Throughput sostenido del motor con fsync en 8 CPUs lógicas | Pasa: ≥ 1 000 000 eventos/s |
+| `python3 scripts/crit_bench.py` | Cifra de VictoriaMetrics con la misma carga y núcleos, y cociente | Pasa: VictoriaMetrics corrió; conclusión de D18, comparable, no equivalente |
+| `python3 scripts/crit_bench_rss.py` | Memoria residente máxima del motor en el benchmark | Pasa: ≤ 4096 MiB |
+| `python3 scripts/crit_size.py` | Líneas del arnés frente a las del motor (D26) | Pasa: arnés < motor |
+
+Los criterios de K1 y K2 siguen pasando sobre el mismo commit.
