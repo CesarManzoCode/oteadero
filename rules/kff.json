@@ -1,0 +1,16 @@
+{
+  "rules": [
+    {
+      "name": "kff_sum",
+      "tenant": "t1",
+      "source": "metrics",
+      "match": {"__name__": "kff_value"},
+      "agg": "sum",
+      "range_ms": 5000,
+      "op": ">",
+      "threshold": 20,
+      "for_ms": 2000,
+      "keep_firing_for_ms": 4000
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+diff --git a/internal/ingest/admission.go b/internal/ingest/admission.go
+index a5d59c9..bf1b3b3 100644
+--- a/internal/ingest/admission.go
++++ b/internal/ingest/admission.go
+@@ -148,7 +148,9 @@ func (s *Sequencer) Submit(b *event.Batch, ack func(Ack)) (cause Cause, ok bool)
+ 		}
+ 	}
+ 	if !ok {
+-		t.stats.Dropped[cause] += uint64(n)
++		if cause != CauseQuota {
++			t.stats.Dropped[cause] += uint64(n)
++		}
+ 		s.mu.Unlock()
+ 		return cause, false
+ 	}

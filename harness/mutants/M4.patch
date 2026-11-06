@@ -1,0 +1,14 @@
+diff --git a/internal/rules/eval.go b/internal/rules/eval.go
+index 1f515d1..6e02a2a 100644
+--- a/internal/rules/eval.go
++++ b/internal/rules/eval.go
+@@ -450,6 +450,9 @@ func (r *ruleState) step(g *group, t int64, v float64, present bool) (string, bo
+ 		g.state = alertPending
+ 		return StatePending, true
+ 	case alertPending:
++		if !present {
++			return "", false
++		}
+ 		if !fires {
+ 			g.state = alertInactive
+ 			return StateInactive, true

@@ -1,0 +1,140 @@
+{
+  "rules": [
+    {
+      "name": "logs_count_by_svc",
+      "tenant": "t1",
+      "source": "logs",
+      "match": {},
+      "agg": "count",
+      "range_ms": 5000,
+      "by": ["svc"],
+      "op": ">",
+      "threshold": 1500,
+      "for_ms": 3000
+    },
+    {
+      "name": "errors_count_series",
+      "tenant": "t1",
+      "source": "metrics",
+      "match": {"__name__": "errors"},
+      "agg": "count",
+      "range_ms": 3000,
+      "op": ">",
+      "threshold": 90
+    },
+    {
+      "name": "errors_sum_series",
+      "tenant": "t1",
+      "source": "metrics",
+      "match": {"__name__": "errors"},
+      "agg": "sum",
+      "range_ms": 5000,
+      "op": ">",
+      "threshold": 600,
+      "keep_firing_for_ms": 5000
+    },
+    {
+      "name": "errors_rate_by_svc",
+      "tenant": "t1",
+      "source": "metrics",
+      "match": {"__name__": "errors"},
+      "agg": "rate",
+      "range_ms": 10000,
+      "by": ["svc"],
+      "op": ">",
+      "threshold": 300,
+      "resolve_threshold": 150,
+      "for_ms": 2000
+    },
+    {
+      "name": "logs_rate_low_by_svc",
+      "tenant": "t1",
+      "source": "logs",
+      "match": {},
+      "agg": "rate",
+      "range_ms": 2000,
+      "by": ["svc"],
+      "op": "<",
+      "threshold": 220,
+      "for_ms": 2000
+    },
+    {
+      "name": "latency_p99_series",
+      "tenant": "t1",
+      "source": "metrics",
+      "match": {"__name__": "latency_ms"},
+      "agg": "quantile",
+      "quantile": 0.99,
+      "range_ms": 1000,
+      "interval_ms": 2000,
+      "op": ">",
+      "threshold": 500
+    },
+    {
+      "name": "latency_p99_by_svc",
+      "tenant": "t1",
+      "source": "metrics",
+      "match": {"__name__": "latency_ms"},
+      "agg": "quantile",
+      "quantile": 0.99,
+      "range_ms": 5000,
+      "by": ["svc"],
+      "op": ">",
+      "threshold": 500,
+      "resolve_threshold": 400,
+      "for_ms": 2000,
+      "keep_firing_for_ms": 3000
+    },
+    {
+      "name": "latency_p99_all",
+      "tenant": "t1",
+      "source": "metrics",
+      "match": {"__name__": "latency_ms"},
+      "agg": "quantile",
+      "quantile": 0.99,
+      "range_ms": 10000,
+      "interval_ms": 5000,
+      "by": [],
+      "op": ">",
+      "threshold": 1000
+    },
+    {
+      "name": "latency_p50_by_svc",
+      "tenant": "t1",
+      "source": "metrics",
+      "match": {"__name__": "latency_ms"},
+      "agg": "quantile",
+      "quantile": 0.5,
+      "range_ms": 3000,
+      "by": ["svc"],
+      "op": ">=",
+      "threshold": 50,
+      "for_ms": 1000
+    },
+    {
+      "name": "users_card_by_svc",
+      "tenant": "t1",
+      "source": "logs",
+      "match": {},
+      "agg": "cardinality",
+      "field": "user",
+      "range_ms": 10000,
+      "by": ["svc"],
+      "op": ">",
+      "threshold": 1000,
+      "resolve_threshold": 600
+    },
+    {
+      "name": "users_card_stream",
+      "tenant": "t1",
+      "source": "logs",
+      "match": {},
+      "agg": "cardinality",
+      "field": "user",
+      "range_ms": 5000,
+      "op": ">",
+      "threshold": 500,
+      "keep_firing_for_ms": 4000
+    }
+  ]
+}

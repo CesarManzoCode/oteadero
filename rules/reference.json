@@ -1,0 +1,38 @@
+{
+  "rules": [
+    {
+      "name": "ref_count_series",
+      "tenant": "t1",
+      "source": "metrics",
+      "match": {"__name__": "ref_events"},
+      "agg": "count",
+      "range_ms": 3000,
+      "op": ">",
+      "threshold": 75,
+      "for_ms": 2000
+    },
+    {
+      "name": "ref_rate_series",
+      "tenant": "t1",
+      "source": "metrics",
+      "match": {"__name__": "ref_events"},
+      "agg": "rate",
+      "range_ms": 5000,
+      "op": ">",
+      "threshold": 200,
+      "for_ms": 1000
+    },
+    {
+      "name": "ref_count_by_svc",
+      "tenant": "t1",
+      "source": "metrics",
+      "match": {"__name__": "ref_events"},
+      "agg": "count",
+      "range_ms": 2000,
+      "by": ["svc"],
+      "op": ">",
+      "threshold": 100,
+      "for_ms": 3000
+    }
+  ]
+}

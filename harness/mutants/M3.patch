@@ -1,0 +1,13 @@
+diff --git a/internal/stream/tail.go b/internal/stream/tail.go
+index 5b13c79..ad96a60 100644
+--- a/internal/stream/tail.go
++++ b/internal/stream/tail.go
+@@ -293,7 +293,7 @@ func (t *Tail) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+ 		writeCode(w, http.StatusGone, codeExpired)
+ 		return
+ 	case resume && tok.n+1 < end.Next:
+-		next = tok.n + 1
++		next = tok.n
+ 		rd, err = wal.OpenReaderAt(t.fsys, t.dir, next)
+ 	default:
+ 		rd, err = wal.OpenReader(t.fsys, t.dir, end)

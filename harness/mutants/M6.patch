@@ -1,0 +1,18 @@
+diff --git a/internal/ckpt/ckpt.go b/internal/ckpt/ckpt.go
+index 2452416..8afc148 100644
+--- a/internal/ckpt/ckpt.go
++++ b/internal/ckpt/ckpt.go
+@@ -341,7 +341,12 @@ func (m *Manager) Recover(seq *ingest.Sequencer) (Report, error) {
+ 		if err != nil {
+ 			return rep, err
+ 		}
+-		r, err := wal.OpenReader(m.fsys, m.logDir, st.Snapshot.Pos)
++		var r *wal.Reader
++		if st.Snapshot.Pos.Next > 0 {
++			r, err = wal.OpenReaderAt(m.fsys, m.logDir, st.Snapshot.Pos.Next-1)
++		} else {
++			r, err = wal.OpenReader(m.fsys, m.logDir, st.Snapshot.Pos)
++		}
+ 		if errors.Is(err, fs.ErrNotExist) {
+ 			rep.Skipped++
+ 			continue
