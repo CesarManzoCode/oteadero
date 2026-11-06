@@ -1,0 +1,15 @@
+diff --git a/internal/eval/coordinator.go b/internal/eval/coordinator.go
+index b034b87..2664e04 100644
+--- a/internal/eval/coordinator.go
++++ b/internal/eval/coordinator.go
+@@ -71,8 +71,9 @@ func (c *Coordinator) Acquire(holder string, done func(Decision)) {
+ 	epoch := c.cur.Epoch
+ 	switch {
+ 	case epoch > 0 && holder == c.cur.Holder:
+-	case epoch == 0 || now >= c.cur.ExpiresMs:
++	case epoch == 0:
+ 		epoch++
++	case now >= c.cur.ExpiresMs:
+ 	default:
+ 		current := c.cur.Holder
+ 		c.mu.Unlock()

@@ -57,10 +57,17 @@ def bin_dir():
 
 
 def binary(name):
-    """Return the path of a binary, building all of them if it is missing."""
+    """Return the path of a binary, building all of them if it is missing.
+
+    Binaries of OTEADERO_BIN are never built here: this tree is not the one they
+    come from, as with the mutants of crit_mutants.py.
+    """
     path = bin_dir() / name
     if path.exists():
         return path
+    if "OTEADERO_BIN" in os.environ:
+        print(f"missing {path} in OTEADERO_BIN")
+        sys.exit(1)
     if shutil.which("go") is None:
         print(f"missing {path} and no go to build it")
         sys.exit(SKIPPED)

@@ -119,6 +119,24 @@ class RefBinaryTest(unittest.TestCase):
                 self.assertIsNone(lib.ref_binary("promtool", refbin))
 
 
+class BinaryTest(unittest.TestCase):
+    def test_oteadero_bin_is_never_built_from_this_tree(self):
+        with tempfile.TemporaryDirectory() as bindir:
+            with mock.patch.dict(os.environ, {"OTEADERO_BIN": bindir}):
+                with mock.patch("subprocess.run") as run:
+                    with self.assertRaises(SystemExit) as raised:
+                        lib.binary("oteadero")
+            run.assert_not_called()
+            self.assertEqual(raised.exception.code, 1)
+
+    def test_oteadero_bin_binary_is_used(self):
+        with tempfile.TemporaryDirectory() as bindir:
+            path = Path(bindir) / "oteadero"
+            path.write_text("")
+            with mock.patch.dict(os.environ, {"OTEADERO_BIN": bindir}):
+                self.assertEqual(lib.binary("oteadero"), path)
+
+
 class ExportFilesTest(unittest.TestCase):
     def test_read_jsonl_ignores_a_torn_last_line(self):
         with tempfile.TemporaryDirectory() as tmp:

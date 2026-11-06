@@ -1,0 +1,29 @@
+diff --git a/internal/ingest/watermark.go b/internal/ingest/watermark.go
+index 6c6824a..6efa835 100644
+--- a/internal/ingest/watermark.go
++++ b/internal/ingest/watermark.go
+@@ -62,13 +62,13 @@ func (w *watermarks) apply(b *event.Batch) (late []bool, wm []int64, nLate int)
+ 			w.byTenant[b.Tenant] = m
+ 			w.order = append(w.order, m)
+ 		} else {
+-			if BucketEnd(ts, w.bucketMs) <= m.maxTs-w.latenessMs {
++			if BucketEnd(ts, w.bucketMs) <= m.maxTs {
+ 				late[i] = true
+ 				nLate++
+ 			}
+ 			m.maxTs = max(m.maxTs, ts)
+ 		}
+-		wm[i] = m.maxTs - w.latenessMs
++		wm[i] = m.maxTs
+ 	}
+ 	return late, wm, nLate
+ }
+@@ -99,7 +99,7 @@ func (w *watermarks) tick(tsMs int64) []WatermarkAdvance {
+ 	for _, m := range w.order {
+ 		if m.maxTs < floor {
+ 			m.maxTs = floor
+-			adv = append(adv, WatermarkAdvance{Tenant: m.tenant, Watermark: floor - w.latenessMs})
++			adv = append(adv, WatermarkAdvance{Tenant: m.tenant, Watermark: floor})
+ 		}
+ 	}
+ 	return adv

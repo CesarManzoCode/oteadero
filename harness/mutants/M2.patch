@@ -1,0 +1,31 @@
+diff --git a/internal/eval/notifier.go b/internal/eval/notifier.go
+index 2859abc..24d2367 100644
+--- a/internal/eval/notifier.go
++++ b/internal/eval/notifier.go
+@@ -13,6 +13,7 @@ import (
+ 	"time"
+ 
+ 	"github.com/CesarManzoCode/oteadero/internal/clock"
++	"github.com/CesarManzoCode/oteadero/internal/rng"
+ 	"github.com/CesarManzoCode/oteadero/internal/rules"
+ )
+ 
+@@ -348,7 +349,7 @@ func (n *Notifier) sendDue(now time.Duration) {
+ 		e.nextAt = now + replyTimeout
+ 		n.inflight++
+ 		n.tr.Send(&Notification{
+-			Key:       e.key,
++			Key:       fmt.Sprintf("%s/%016x", e.key, sendKeys.Uint64()),
+ 			Incident:  e.incident.ID(),
+ 			Kind:      e.kind,
+ 			Rule:      e.incident.Rule,
+@@ -362,6 +363,9 @@ func (n *Notifier) sendDue(now time.Duration) {
+ 	}
+ }
+ 
++// sendKeys draws a fresh idempotency key suffix for every attempt.
++var sendKeys = rng.NewFromOS()
++
+ // fail counts a failed attempt and schedules the next one.
+ func (n *Notifier) fail(e *entry, now time.Duration) {
+ 	n.counts[statusError].Add(1)

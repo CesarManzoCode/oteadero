@@ -1,0 +1,13 @@
+diff --git a/internal/ingest/watermark.go b/internal/ingest/watermark.go
+index 6c6824a..ad95c89 100644
+--- a/internal/ingest/watermark.go
++++ b/internal/ingest/watermark.go
+@@ -62,7 +62,7 @@ func (w *watermarks) apply(b *event.Batch) (late []bool, wm []int64, nLate int)
+ 			w.byTenant[b.Tenant] = m
+ 			w.order = append(w.order, m)
+ 		} else {
+-			if BucketEnd(ts, w.bucketMs) <= m.maxTs-w.latenessMs {
++			if BucketEnd(ts, w.bucketMs) < m.maxTs-w.latenessMs {
+ 				late[i] = true
+ 				nLate++
+ 			}
