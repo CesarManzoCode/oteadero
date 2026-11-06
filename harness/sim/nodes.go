@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	evt "github.com/CesarManzoCode/oteadero/internal/event"
 	"github.com/CesarManzoCode/oteadero/internal/ingest"
 	"github.com/CesarManzoCode/oteadero/internal/server"
+	"github.com/CesarManzoCode/oteadero/internal/wal"
 )
 
 // Message and timer kinds of the engine scenario.
@@ -111,6 +113,17 @@ type serveProc struct {
 	// armed is set while a wake is pending at wakeAt, on the monotonic clock.
 	armed  bool
 	wakeAt time.Duration
+	// held is the open tail connection without a token, if any.
+	held *heldTail
+}
+
+// heldTail is a tail connection that came without a token. Over HTTP it
+// would stay open from the durable end at its arrival; here one connection is
+// one request, so serve keeps it, with the token of the last durable event at
+// its arrival, and answers it once the handler has something after that.
+type heldTail struct {
+	from string
+	x    tailRequestMsg
 }
 
 func (sc *scenario) startServe(env *Env) Process {
@@ -162,9 +175,64 @@ func (p *serveProc) Receive(m Message) {
 		var x tailRequestMsg
 		decode(m.Payload, &x)
 		status, body := p.tail(x)
+		if x.Token == "" && status == http.StatusOK && len(body) == 0 {
+			if tok, ok := p.durableToken(); ok {
+				// A newer connection replaces one the subscriber gave up on.
+				x.Token = tok
+				p.held = &heldTail{from: m.From, x: x}
+				break
+			}
+		}
 		p.env.Send(m.From, kindTailData, encode(tailDataMsg{Seq: x.Seq, Status: status, Body: body}))
 	}
 	p.pump()
+}
+
+// durableToken returns the token of the last event in the synced log of
+// serve, after which a connection without a token starts; ok is false while
+// that log holds no event or cannot be read, and then the connection ends
+// empty and the subscriber reconnects.
+func (p *serveProc) durableToken() (string, bool) {
+	synced := p.sc.sim.Disk(serveNode).Synced()
+	bases, err := wal.Segments(synced, logDir)
+	if err != nil || len(bases) == 0 {
+		return "", false
+	}
+	last := bases[len(bases)-1]
+	r, err := wal.OpenReader(synced, logDir, wal.Pos{Segment: last, Byte: wal.HeaderSize, Next: last})
+	if err != nil {
+		return "", false
+	}
+	defer r.Close()
+	for {
+		_, err := r.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", false
+		}
+	}
+	next := r.Pos().Next
+	if next == 0 {
+		return "", false
+	}
+	return fmt.Sprintf("%016x-%d", r.ID(), next-1), true
+}
+
+// answerHeld answers the held tail connection once the handler sends
+// something after its token: events, a lagged cut or a refusal.
+func (p *serveProc) answerHeld() {
+	h := p.held
+	if h == nil {
+		return
+	}
+	status, body := p.tail(h.x)
+	if status == http.StatusOK && len(body) == 0 {
+		return
+	}
+	p.held = nil
+	p.env.Send(h.from, kindTailData, encode(tailDataMsg{Seq: h.x.Seq, Status: status, Body: body}))
 }
 
 // tail serves one connection of the subscriber with the handler of serve. Its
@@ -186,9 +254,16 @@ func (p *serveProc) tail(x tailRequestMsg) (int, []byte) {
 	return w.status, w.body.Bytes()
 }
 
-// pump polls the sequencer while it has work now and arms a wake for the
-// next deadline it reports.
+// pump polls the sequencer while it has work now, arms a wake for the next
+// deadline it reports and then answers the held tail connection.
 func (p *serveProc) pump() {
+	p.poll()
+	if p.srv != nil {
+		p.answerHeld()
+	}
+}
+
+func (p *serveProc) poll() {
 	for {
 		if err := p.seq.Poll(); err != nil {
 			p.sc.fail(serveNode, err)
