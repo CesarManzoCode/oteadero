@@ -243,7 +243,11 @@ func TestDropReplyStatus(t *testing.T) {
 
 func TestMetricsEndpoint(t *testing.T) {
 	f := start(t, testConfig(), vfs.NewMem(), "")
-	f.wantMetrics(`oteadero_queue_depth_events{queue="a"} 0`)
+	f.wantMetrics(
+		`oteadero_queue_depth_events{queue="a"} 0`,
+		`oteadero_queue_depth_events{queue="sequencer"} 0`,
+		`oteadero_sketch_observed_rel_error_max 0`,
+	)
 	if _, text := f.get("/metrics"); strings.Contains(text, "oteadero_watermark_lag_ms{") {
 		t.Fatalf("watermark lag before the first event:\n%s", text)
 	}

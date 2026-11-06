@@ -3,10 +3,15 @@ package eval
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/CesarManzoCode/oteadero/internal/config"
+	"github.com/CesarManzoCode/oteadero/internal/event"
+	"github.com/CesarManzoCode/oteadero/internal/ingest"
 	"github.com/CesarManzoCode/oteadero/internal/rules"
 	"github.com/CesarManzoCode/oteadero/internal/wal"
 )
@@ -28,6 +33,15 @@ type Core struct {
 	notifier *Notifier
 	replica  *Replica
 	failed   bool
+	gauges   gauges
+}
+
+// gauges are the replica's values that /metrics reports, copied after each
+// step so that the HTTP goroutine never reads the replica.
+type gauges struct {
+	mu     sync.Mutex
+	marks  []ingest.Mark
+	errMax float64
 }
 
 // NewCore wires an evaluator over tr. onRole runs at each change of role.
@@ -50,7 +64,36 @@ func (c *Core) Recover() error {
 		c.failed = true
 		return err
 	}
+	c.publish()
 	return nil
+}
+
+// publish copies the watermarks and the sketch error of the replica for
+// WriteMetrics.
+func (c *Core) publish() {
+	marks := c.replica.class.Marks()
+	errMax := c.replica.agg.SketchErrorMax()
+	c.gauges.mu.Lock()
+	c.gauges.marks, c.gauges.errMax = marks, errMax
+	c.gauges.mu.Unlock()
+}
+
+// WriteMetrics writes the metrics of §4.10 that an evaluator has: the
+// watermark lag of each tenant as of what the replica read, the largest
+// observed sketch error and the notifications. Safe for concurrent use.
+func (c *Core) WriteMetrics(w io.Writer) {
+	now := c.deps.Clock.NowMs()
+	c.gauges.mu.Lock()
+	marks, errMax := c.gauges.marks, c.gauges.errMax
+	c.gauges.mu.Unlock()
+	fmt.Fprintln(w, "# TYPE oteadero_watermark_lag_ms gauge")
+	for _, m := range marks {
+		lag := now - (m.MaxTs - c.cfg.LatenessMs)
+		fmt.Fprintf(w, "oteadero_watermark_lag_ms%s %d\n", event.CanonicalLabels([]event.Label{{Name: "tenant", Value: m.Tenant}}), lag)
+	}
+	fmt.Fprintln(w, "# TYPE oteadero_sketch_observed_rel_error_max gauge")
+	fmt.Fprintf(w, "oteadero_sketch_observed_rel_error_max %v\n", errMax)
+	c.notifier.WriteMetrics(w)
 }
 
 // Step reads up to stepRecords records, checkpoints when due and polls the
@@ -70,6 +113,7 @@ func (c *Core) Step() (more bool, err error) {
 		c.failed = true
 		return false, err
 	}
+	c.publish()
 	c.notifier.Poll()
 	return read == stepRecords, nil
 }
@@ -125,7 +169,7 @@ func (n *Node) Handler() http.Handler { return n.mux }
 
 func (n *Node) metrics(w http.ResponseWriter, _ *http.Request) {
 	var out bytes.Buffer
-	n.core.notifier.WriteMetrics(&out)
+	n.core.WriteMetrics(&out)
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	w.Write(out.Bytes())
 }

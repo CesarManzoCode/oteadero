@@ -360,8 +360,10 @@ func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, `{"status":"ok"}`)
 }
 
-// metrics serves the counters of §4.10 that exist so far, in the exposition
-// format: all the lines of a metric together, after its TYPE line.
+// metrics serves the metrics of §4.10 in the exposition format: all the lines
+// of a metric together, after its TYPE line. The queues are each tenant's
+// admission queue, the sequencer's (written, waiting for the fsync) and the
+// stream subscribers.
 func (s *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 	stats := s.seq.Stats()
 	now := s.clk.NowMs()
@@ -399,6 +401,7 @@ func (s *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 			line("oteadero_queue_depth_events", stats[i].QueuedEvents, event.Label{Name: "queue", Value: stats[i].Tenant})
 		}
 	}
+	line("oteadero_queue_depth_events", s.seq.UnsyncedEvents(), event.Label{Name: "queue", Value: "sequencer"})
 	line("oteadero_queue_depth_events", s.tail.Active()+s.live.Active(), event.Label{Name: "queue", Value: "tail"})
 	out.WriteString("# TYPE oteadero_sketch_observed_rel_error_max gauge\n")
 	fmt.Fprintf(&out, "oteadero_sketch_observed_rel_error_max %v\n", s.agg.SketchErrorMax())

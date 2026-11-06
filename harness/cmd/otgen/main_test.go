@@ -47,7 +47,7 @@ func sameBatches(a, b []batch) bool {
 	return true
 }
 
-var filledProfiles = []string{"basic", "late", "saturation", "fairness", "bench", "alerts", "reference", "reference-kff"}
+var filledProfiles = []string{"basic", "late", "saturation", "fairness", "bench", "alerts", "reference", "reference-kff", "tail"}
 
 func TestSameSeedSameBytes(t *testing.T) {
 	for _, name := range filledProfiles {
@@ -226,6 +226,33 @@ func TestProfileParameters(t *testing.T) {
 	}
 	if b := cycles(t, "bench", 1, 1); b[0].n != 10000 || b[0].logs {
 		t.Errorf("bench batch: n = %d, logs = %v", b[0].n, b[0].logs)
+	}
+}
+
+func TestTailProfile(t *testing.T) {
+	p, err := lookupProfile("tail", 0)
+	if err != nil || len(p.tenants) != 1 || !p.wallClock || p.conns != 1 || p.metricSeries != 0 {
+		t.Fatalf("tail: %+v, %v", p, err)
+	}
+	if plan := p.tenants[0]; plan.rate != 20000 || plan.events != 20000*30 {
+		t.Fatalf("tail plan: %+v", plan)
+	}
+	if p, _ := lookupProfile("tail", 5); p.tenants[0].events != 100000 {
+		t.Fatalf("tail for 5 s: %d events", p.tenants[0].events)
+	}
+	before := time.Now().UnixMilli()
+	g := newGenerator(p, 0, 1, true)
+	out := g.cycle()
+	if len(out) != 1 || !out[0].logs || out[0].n != 1000 {
+		t.Fatalf("tail cycle: %d batches", len(out))
+	}
+	for line := range strings.Lines(string(out[0].body)) {
+		var e struct {
+			Ts int64 `json:"ts"`
+		}
+		if err := json.Unmarshal([]byte(line), &e); err != nil || e.Ts < before || e.Ts > time.Now().UnixMilli() {
+			t.Fatalf("tail event %q: ts not from the clock (%v)", line, err)
+		}
 	}
 }
 
@@ -662,7 +689,6 @@ func TestRunRejectsBadUsage(t *testing.T) {
 		{"--profile", "basic", "--seed", "1", "--target", "http://x"},
 		{"--profile", "basic", "--seed", "1", "--report", report, "--sink", "disk"},
 		{"--profile", "nope", "--seed", "1", "--report", report, "--sink", "null"},
-		{"--profile", "tail", "--seed", "1", "--report", report, "--sink", "null"},
 		{"--profile", "alerts", "--seed", "1", "--report", report, "--sink", "null", "--duration-s", "5"},
 		{"--profile", "reference", "--seed", "1", "--report", report, "--sink", "null", "--duration-s", "5"},
 		{"--profile", "basic", "--seed", "1", "--report", report, "--sink", "null", "--duration-s", "5"},

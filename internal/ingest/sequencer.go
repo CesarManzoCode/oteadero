@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/CesarManzoCode/oteadero/internal/clock"
@@ -88,6 +89,9 @@ type Sequencer struct {
 	leases  []*leaseEntry
 	// delivered is each tenant's watermark as of what reached the sink.
 	delivered map[string]int64
+	// unsyncedEvents is the depth of the sequencer's own queue: events
+	// written to the log and waiting for the fsync and the ack.
+	unsyncedEvents atomic.Int64
 
 	// Owned by the Poll goroutine.
 	wm            *watermarks
@@ -223,6 +227,7 @@ func (s *Sequencer) write(e *entry) error {
 	}
 	s.markUnsynced()
 	s.pending = append(s.pending, delivery{e: e, stats: &e.t.stats, batch: s.classify(e.b, first)})
+	s.unsyncedEvents.Add(e.n)
 	return nil
 }
 
@@ -262,6 +267,11 @@ func (s *Sequencer) maybeTick() error {
 	return nil
 }
 
+// UnsyncedEvents returns how many events are written to the log and wait for
+// the fsync before their ack: the depth of the sequencer's queue. Safe for
+// concurrent use.
+func (s *Sequencer) UnsyncedEvents() int64 { return s.unsyncedEvents.Load() }
+
 // SetSyncHook makes every successful fsync of the log call fn with the
 // position right after the last durable record, before anything is acked or
 // delivered. It runs on the Poll goroutine and must not block. Call it before
@@ -280,6 +290,7 @@ func (s *Sequencer) commit() error {
 	ds := s.pending
 	s.pending = nil
 	s.unsynced = false
+	s.unsyncedEvents.Store(0)
 	s.deliver(ds)
 	return nil
 }
@@ -342,6 +353,7 @@ func (s *Sequencer) fail(err error) error {
 	s.mu.Unlock()
 	ds := s.pending
 	s.pending = nil
+	s.unsyncedEvents.Store(0)
 	for _, d := range ds {
 		if d.e != nil && d.e.ack != nil {
 			d.e.ack(Ack{Events: int(d.e.n), Err: err})

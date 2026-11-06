@@ -1,5 +1,6 @@
 """What the criterion scripts share: processes, otgen, oracle and export comparisons."""
 
+import http.client
 import json
 import math
 import os
@@ -10,6 +11,7 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import NamedTuple
@@ -39,6 +41,8 @@ _ACCOUNTING_LINE = re.compile(
     r"^oteadero_events_(accepted|dropped)_total\{(.*)\} (\d+)$", re.MULTILINE
 )
 _TENANT_LABEL = re.compile(r'tenant="([^"]*)"')
+_METRIC_LINE = re.compile(r"^([A-Za-z_:][A-Za-z0-9_:]*)(\{.*\})? (\S+)$")
+_METRIC_LABEL = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)="((?:[^"\\]|\\.)*)"')
 
 ALERTS_RULES = REPO_ROOT / "rules" / "alerts.json"
 # What the alerts profile sketches, and the published bounds of D07 and D14.
@@ -416,6 +420,137 @@ def fetch_accounting(url):
         counters = result.setdefault(tenant, {"accepted": 0, "dropped": 0})
         counters[name] += int(value)
     return result
+
+
+def parse_metrics(text):
+    """Return (name, ((label, value), ...)) -> value of a Prometheus text exposition.
+
+    Labels are sorted by name; comment and blank lines are skipped.
+    """
+    samples = {}
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        match = _METRIC_LINE.match(line)
+        if match is None:
+            raise ValueError(f"bad metrics line {line!r}")
+        name, labels, value = match.groups()
+        pairs = tuple(sorted(_METRIC_LABEL.findall(labels or "")))
+        samples[(name, pairs)] = float(value)
+    return samples
+
+
+def fetch_metrics(url):
+    """Return the parsed /metrics of a process, as parse_metrics does."""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(f"{url}/metrics") as resp:
+        return parse_metrics(resp.read().decode())
+
+
+def sse_events(lines):
+    """Yield the events of a Server-Sent Events stream as dicts with id, event and data.
+
+    lines are str, with or without their line end. A blank line ends an event,
+    a line that starts with ':' is a comment and several data lines join with
+    newlines. id is None when the event has none and event is "message" by
+    default; an event without data is not dispatched, as in the SSE spec.
+    """
+    ident, kind, data = None, None, []
+    for line in lines:
+        line = line.rstrip("\r\n")
+        if not line:
+            if data:
+                yield {"id": ident, "event": kind or "message", "data": "\n".join(data)}
+            ident, kind, data = None, None, []
+            continue
+        if line.startswith(":"):
+            continue
+        name, _, value = line.partition(":")
+        if value.startswith(" "):
+            value = value[1:]
+        if name == "id":
+            ident = value
+        elif name == "event":
+            kind = value
+        elif name == "data":
+            data.append(value)
+
+
+def response_lines(resp):
+    """Yield the lines of an HTTP response body as str, as they arrive."""
+    for raw in iter(resp.readline, b""):
+        yield raw.decode("utf-8", "replace")
+
+
+def open_tail(url, tenant, kind, match="", token=None, header=True, timeout=10, connection=None):
+    """Open GET /v1/tail and return (connection, response).
+
+    token resumes with Last-Event-ID, or with ?after= when header is false.
+    connection, if given, is an unconnected http.client.HTTPConnection to use.
+    """
+    query = {"tenant": tenant, "kind": kind}
+    if match:
+        query["match"] = match
+    headers = {"Accept": "text/event-stream"}
+    if token is not None:
+        if header:
+            headers["Last-Event-ID"] = token
+        else:
+            query["after"] = token
+    parts = urllib.parse.urlsplit(url)
+    conn = connection or http.client.HTTPConnection(parts.hostname, parts.port, timeout=timeout)
+    conn.request("GET", "/v1/tail?" + urllib.parse.urlencode(query), headers=headers)
+    return conn, conn.getresponse()
+
+
+def offset_differences(received, expected):
+    """Compare the offsets a subscriber received with the ones it must receive.
+
+    received must be strictly increasing and hold exactly the offsets of
+    expected. Returns one line per repeated offset, per offset that goes back,
+    per gap (an expected offset never received) and per offset left over.
+    """
+    diffs = []
+    for prev, cur in zip(received, received[1:]):
+        if cur == prev:
+            diffs.append(f"repeated {cur}")
+        elif cur < prev:
+            diffs.append(f"goes back: {cur} after {prev}")
+    got, want = set(received), set(expected)
+    diffs += [f"gap: missing {o}" for o in sorted(want - got)]
+    diffs += [f"extra {o}" for o in sorted(got - want)]
+    return diffs
+
+
+def print_offsets(diffs):
+    """Print the offset differences and the count line; return whether there are none."""
+    for line in diffs[:_MAX_SHOWN]:
+        print(line)
+    print(f"offsets: {len(diffs)} diferencias")
+    return not diffs
+
+
+def run_oracle_offsets(data_dir, out, tenant, kind, match=""):
+    """Return the offsets that the oracle says GET /v1/tail serves, in log order."""
+    subprocess.run(
+        [
+            sys.executable,
+            REPO_ROOT / "oracle" / "cli.py",
+            "offsets",
+            "--data",
+            data_dir,
+            "--tenant",
+            tenant,
+            "--kind",
+            kind,
+            "--match",
+            match,
+            "--out",
+            out,
+        ],
+        check=True,
+    )
+    return [row["o"] for row in read_jsonl(Path(out) / "offsets.jsonl")]
 
 
 class OracleResult(NamedTuple):

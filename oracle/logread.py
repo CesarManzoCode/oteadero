@@ -155,6 +155,25 @@ def _read_bytes(buf, pos):
     return buf[pos:end], end
 
 
+def tail_offsets(entries, tenant, kind, match):
+    """Return the offsets that GET /v1/tail of section 4.9 serves, in log order.
+
+    They are the events of tenant and kind whose labels equal every item of
+    match; a label that is missing does not match. In metrics, __name__ is the
+    metric name.
+    """
+    offsets = []
+    for entry in entries:
+        if isinstance(entry, Tick) or entry.tenant != tenant or entry.kind != kind:
+            continue
+        name, labels = split_series(entry.series)
+        if name is not None:
+            labels["__name__"] = name
+        if all(labels.get(k) == v for k, v in match.items()):
+            offsets.append(entry.offset)
+    return offsets
+
+
 def _text(raw):
     # surrogateescape keeps two series with different invalid UTF-8 apart.
     return raw.decode("utf-8", "surrogateescape")

@@ -64,6 +64,10 @@ const (
 	kffIntervalMs = 1000
 	kffCycleS     = 40
 
+	// The tail profile: one tenant of logs at tailEventsPerS events per second
+	// of the clock, for 30 s unless --duration-s says otherwise.
+	tailEventsPerS = 20000
+
 	// pacedConns is the connections per tenant of the profiles with a rate.
 	// A connection waits for the fsync of its batch, so with too few of them
 	// the acks, not the rate, would set what a tenant offers, and a load meant
@@ -106,6 +110,8 @@ type profile struct {
 	scenario bool
 	// shape replaces them with the series of a reference profile.
 	shape refShape
+	// wallClock stamps the events with the clock even without --realtime.
+	wallClock bool
 }
 
 // refShape is the load of a reference profile (D12).
@@ -244,7 +250,23 @@ func lookupProfile(name string, durationS float64) (profile, error) {
 			shape:       shapeRegular,
 		}, nil
 	case "tail":
-		return profile{}, fmt.Errorf("profile %q is declared but not filled yet", name)
+		d := 30.0
+		if durationS > 0 {
+			d = durationS
+		}
+		// Logs only, one connection: batches reach the log in the order of
+		// their timestamps, so a subscriber sees every event of the load.
+		p := mixed
+		p.metricSeries = 0
+		p.batchEvents = 1000
+		p.wallClock = true
+		p.tenants = []tenantPlan{{
+			name:       "t1",
+			rate:       tailEventsPerS,
+			events:     int64(tailEventsPerS * d),
+			stepEvents: tailEventsPerS / 1000,
+		}}
+		return p, nil
 	}
 	return profile{}, fmt.Errorf("unknown profile %q", name)
 }
@@ -863,7 +885,7 @@ func run(args []string, stderr io.Writer) int {
 		return 2
 	}
 
-	rep := runProfile(p, *seed, *realtime, newSender(*target, *vm, null, p.conns*len(p.tenants)))
+	rep := runProfile(p, *seed, *realtime || p.wallClock, newSender(*target, *vm, null, p.conns*len(p.tenants)))
 	data, err := json.MarshalIndent(rep, "", "  ")
 	if err == nil {
 		err = os.WriteFile(*reportPath, append(data, '\n'), 0o644)

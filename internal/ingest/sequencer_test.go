@@ -792,3 +792,20 @@ func TestSyncHookSeesDurableEndBeforeAck(t *testing.T) {
 		t.Fatalf("hook saw %+v, log end %+v", seen, f.seq.log.End())
 	}
 }
+
+func TestQueueDepths(t *testing.T) {
+	f := newFixture(t, config(open("a")))
+	f.submit(sized("a", 10))
+	f.submit(sized("a", 5))
+	if got := f.stats("a").QueuedEvents; got != 15 || f.seq.UnsyncedEvents() != 0 {
+		t.Fatalf("before Poll: tenant queue %d, sequencer %d; want 15, 0", got, f.seq.UnsyncedEvents())
+	}
+	f.poll()
+	if got := f.stats("a").QueuedEvents; got != 0 || f.seq.UnsyncedEvents() != 15 {
+		t.Fatalf("written, not synced: tenant queue %d, sequencer %d; want 0, 15", got, f.seq.UnsyncedEvents())
+	}
+	f.advance(f.cfg.FsyncMaxDelay)
+	if n := f.seq.UnsyncedEvents(); n != 0 {
+		t.Fatalf("after the commit: sequencer %d, want 0", n)
+	}
+}

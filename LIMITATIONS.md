@@ -24,6 +24,8 @@ Fuente única de lo que el proyecto no demuestra. Ningún otro archivo repite es
 - Los reenvíos de una promoción solo cubren 10 min de tiempo de evento por inquilino: una notificación que ningún líder entregó en ese tiempo se abandona, contada con `status="expired"`. Ese estado también cuenta, en los seguidores, las claves que el líder entregó y ellos dejan salir de la ventana.
 - Un líder guarda sin tope lo que no ha podido confirmar mientras conserva el arrendamiento, aunque salga de la ventana: con el receptor caído su memoria crece con las transiciones.
 - `oteadero_notifications_total` empieza en cero con cada arranque del evaluador; no está en el checkpoint.
+- El `/metrics` de `evaluate` solo tiene `oteadero_watermark_lag_ms`, `oteadero_sketch_observed_rel_error_max` y `oteadero_notifications_total`; su retraso de watermark es el de lo que la réplica ya leyó del log, no el de `serve`. Recibidos, aceptados, descartes, tardíos y colas solo están en el de `serve`.
+- `oteadero_queue_depth_events{queue="sequencer"}` cuenta los eventos escritos en el log que esperan el fsync; los lotes ya sincronizados que la agregación aún no procesó no tienen métrica de cola.
 - En el cuerpo de una notificación, un valor NaN o ±Inf va como `null`, igual que el de un grupo ausente.
 - Si se pierde un LEASE ya confirmado, como al truncar a mano el último registro del log, la época puede retroceder y dos evaluadores pueden creer que tienen la misma: las épocas valen mientras el log conserve lo sincronizado.
 - Un suscriptor de `/v1/tail` cuyo cliente no lee queda bloqueado en la escritura: el corte `lagged` solo se decide entre registros, así que no le llega hasta que la escritura avanza, y mientras tanto su segmento sigue fijado frente a la limpieza del log.

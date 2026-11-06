@@ -7,7 +7,7 @@ import sys
 
 from exact import collect_buckets, exact_row
 from incidents import notifications
-from logread import read_log
+from logread import KIND_LOGS, KIND_METRICS, read_log, tail_offsets
 from rules import SKETCH_AGGS, evaluate, load_engine_values, load_rules, rule_windows, window_value
 from windows import compute_windows
 
@@ -87,6 +87,24 @@ def _incidents(args):
     _write_jsonl(os.path.join(args.out, "incidents.jsonl"), notifications(transitions))
 
 
+def _match(text):
+    """Parse the k=v,... of a tail filter into a dict."""
+    match = {}
+    for pair in filter(None, text.split(",")):
+        name, sep, value = pair.partition("=")
+        if not sep or not name:
+            raise argparse.ArgumentTypeError(f"bad match item {pair!r}")
+        match[name] = value
+    return match
+
+
+def _offsets(args):
+    kind = KIND_LOGS if args.kind == "logs" else KIND_METRICS
+    offsets = tail_offsets(read_log(args.data), args.tenant, kind, args.match)
+    os.makedirs(args.out, exist_ok=True)
+    _write_jsonl(os.path.join(args.out, "offsets.jsonl"), ({"o": o} for o in offsets))
+
+
 def _log_params(command):
     command.add_argument("--data", required=True)
     command.add_argument("--bucket-ms", type=_positive, default=1000)
@@ -115,6 +133,13 @@ def main(argv=None):
         help="evals.jsonl of the engine, read for the conditions of quantile and cardinality",
     )
     rules.set_defaults(run=_rules)
+    offsets = commands.add_parser("offsets", help="offsets a tail subscriber must receive")
+    offsets.add_argument("--data", required=True)
+    offsets.add_argument("--tenant", required=True)
+    offsets.add_argument("--kind", choices=("logs", "metrics"), required=True)
+    offsets.add_argument("--match", type=_match, default={})
+    offsets.add_argument("--out", required=True)
+    offsets.set_defaults(run=_offsets)
     incidents = commands.add_parser("incidents", help="expected incidents and keys")
     incidents.add_argument("--transitions", required=True)
     incidents.add_argument("--out", required=True)

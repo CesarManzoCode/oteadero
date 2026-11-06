@@ -15,6 +15,7 @@ from logread import (
     read_log,
     read_uvarint,
     split_series,
+    tail_offsets,
 )
 
 LOG_ID = bytes(range(1, 9))
@@ -270,6 +271,31 @@ class LabelsTest(unittest.TestCase):
             with self.subTest(text):
                 with self.assertRaises(ValueError):
                     parse_labels(text)
+
+
+class TailOffsetsTest(unittest.TestCase):
+    ENTRIES = [
+        Event(0, "a", KIND_LOGS, '{s="x"}', 0.0, 10),
+        Event(1, "a", KIND_METRICS, 'm{s="x"}', 1.0, 10),
+        Tick(20),
+        Event(2, "b", KIND_LOGS, '{s="x"}', 0.0, 30),
+        Event(3, "a", KIND_LOGS, '{s="y"}', 0.0, 40),
+        Event(4, "a", KIND_LOGS, '{s="x",t="1"}', 0.0, 50),
+        Event(5, "a", KIND_METRICS, 'n{s="x"}', 1.0, 60),
+    ]
+
+    def test_tenant_and_kind(self):
+        self.assertEqual(tail_offsets(self.ENTRIES, "a", KIND_LOGS, {}), [0, 3, 4])
+        self.assertEqual(tail_offsets(self.ENTRIES, "b", KIND_LOGS, {}), [2])
+
+    def test_match_is_exact_and_a_missing_label_does_not_match(self):
+        self.assertEqual(tail_offsets(self.ENTRIES, "a", KIND_LOGS, {"s": "x"}), [0, 4])
+        self.assertEqual(tail_offsets(self.ENTRIES, "a", KIND_LOGS, {"t": "1"}), [4])
+        self.assertEqual(tail_offsets(self.ENTRIES, "a", KIND_LOGS, {"t": ""}), [])
+
+    def test_name_matches_the_metric(self):
+        self.assertEqual(tail_offsets(self.ENTRIES, "a", KIND_METRICS, {"__name__": "n"}), [5])
+        self.assertEqual(tail_offsets(self.ENTRIES, "a", KIND_METRICS, {"s": "x"}), [1, 5])
 
 
 if __name__ == "__main__":
