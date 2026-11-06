@@ -38,16 +38,16 @@ func TestShortScenarioSameSeedSameHash(t *testing.T) {
 	if a.Hash != b.Hash || !bytes.Equal(a.Record, b.Record) {
 		t.Fatalf("same seed, hashes %s and %s", a.Hash, b.Hash)
 	}
-	if !bytes.Equal(a.Receiver, b.Receiver) || !bytes.Equal(a.Transitions, b.Transitions) {
-		t.Fatal("same seed, different receiver or transitions")
+	if !bytes.Equal(a.Receiver, b.Receiver) || !bytes.Equal(a.Transitions, b.Transitions) || !bytes.Equal(a.Evals, b.Evals) {
+		t.Fatal("same seed, different receiver, transitions or evals")
 	}
 	for _, kind := range []string{KindCrash, KindPause, kindLeaseRequest, kindNotify, kindTailData} {
 		if !bytes.Contains(a.Record, []byte(" kind="+kind+" ")) {
 			t.Errorf("the record has no %s", kind)
 		}
 	}
-	if len(a.Receiver) == 0 || len(a.Transitions) == 0 || len(a.LogFiles) == 0 {
-		t.Fatalf("receiver %d bytes, transitions %d bytes, %d log files", len(a.Receiver), len(a.Transitions), len(a.LogFiles))
+	if len(a.Receiver) == 0 || len(a.Transitions) == 0 || len(a.Evals) == 0 || len(a.LogFiles) == 0 {
+		t.Fatalf("receiver %d bytes, transitions %d bytes, evals %d bytes, %d log files", len(a.Receiver), len(a.Transitions), len(a.Evals), len(a.LogFiles))
 	}
 }
 

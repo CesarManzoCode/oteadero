@@ -76,7 +76,10 @@ type Result struct {
 	// Transitions is transitions.jsonl: the distinct lines that the
 	// evaluators exported in all their runs (§4.8), by t and then by bytes.
 	Transitions []byte
-	Checks      []Check
+	// Evals is evals.jsonl, merged the same way; the oracle reads it for the
+	// conditions of the sketch rules.
+	Evals  []byte
+	Checks []Check
 }
 
 // File is a file of a node's disk.
@@ -335,7 +338,10 @@ func (sc *scenario) finish() (*Result, error) {
 		}
 		res.Receiver = append(append(res.Receiver, line...), '\n')
 	}
-	if res.Transitions, err = sc.transitions(); err != nil {
+	if res.Transitions, err = sc.exported("transitions.jsonl"); err != nil {
+		return nil, err
+	}
+	if res.Evals, err = sc.exported("evals.jsonl"); err != nil {
 		return nil, err
 	}
 
@@ -407,9 +413,9 @@ func scanLog(fsys vfs.FS) (map[string]uint64, []uint64, error) {
 	}
 }
 
-// transitions merges the transitions.jsonl of every export run of every
-// evaluator into its distinct whole lines, by t and then by bytes.
-func (sc *scenario) transitions() ([]byte, error) {
+// exported merges the file name of every export run of every evaluator into
+// its distinct whole lines, by t and then by bytes.
+func (sc *scenario) exported(name string) ([]byte, error) {
 	type line struct {
 		t    int64
 		text []byte
@@ -423,7 +429,7 @@ func (sc *scenario) transitions() ([]byte, error) {
 			return nil, err
 		}
 		for _, run := range runs {
-			data, err := readAll(disk, path.Join(exportDir, run, "transitions.jsonl"))
+			data, err := readAll(disk, path.Join(exportDir, run, name))
 			if err != nil {
 				return nil, err
 			}

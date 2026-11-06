@@ -972,3 +972,25 @@ def percentile(values, q):
         raise ValueError("percentile of nothing")
     ordered = sorted(values)
     return ordered[max(0, math.ceil(q * len(ordered)) - 1)]
+
+
+class SimRun(NamedTuple):
+    code: int  # exit code of otsim
+    hash: str | None  # the hash it printed, or None
+    output: str  # its stdout and stderr
+
+
+_SIM_HASH = re.compile(r"^hash: ([0-9a-f]+)$", re.MULTILINE)
+
+
+def run_otsim(seed, out, faults=True):
+    """Run otsim with a seed into an emptied out and return what it did."""
+    out = Path(out)
+    shutil.rmtree(out, ignore_errors=True)
+    out.mkdir(parents=True)
+    command = [binary("otsim"), "--seed", str(seed), "--out", out, "--rules", ALERTS_RULES]
+    if not faults:
+        command.append("--no-faults")
+    proc = subprocess.run(command, capture_output=True, text=True)
+    found = _SIM_HASH.search(proc.stdout)
+    return SimRun(proc.returncode, found.group(1) if found else None, proc.stdout + proc.stderr)

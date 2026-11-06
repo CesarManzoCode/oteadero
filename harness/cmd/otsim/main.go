@@ -1,8 +1,8 @@
 // Command otsim runs the engine scenario of the deterministic simulation
 // (D16): serve, three evaluators, the receiver, producers and a tail
 // subscriber on virtual time, with the fault schedule its seed draws. It
-// writes the record, the log in the format of §4.3, the receiver log and the
-// transitions, prints the hash and one line per invariant, and exits with 0
+// writes the record, the log in the format of §4.3, the receiver log, the
+// transitions and the evals, prints the hash and one line per invariant, and exits with 0
 // only if every invariant holds.
 package main
 
@@ -72,8 +72,8 @@ func report(res *sim.Result, dir string, stdout, stderr io.Writer) int {
 	return code
 }
 
-// write stores registry.log, data/log/, receiver.jsonl and transitions.jsonl
-// in dir. A data/log/ that is not empty is refused, so that the oracle never
+// write stores registry.log, data/log/, receiver.jsonl, transitions.jsonl and
+// evals.jsonl in dir. A data/log/ that is not empty is refused, so that the oracle never
 // reads the segments of two runs together.
 func write(res *sim.Result, dir string) error {
 	logDir := filepath.Join(dir, "data", "log")
@@ -92,6 +92,7 @@ func write(res *sim.Result, dir string) error {
 		"registry.log":      res.Record,
 		"receiver.jsonl":    res.Receiver,
 		"transitions.jsonl": res.Transitions,
+		"evals.jsonl":       res.Evals,
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name), data, 0o644); err != nil {
 			return err

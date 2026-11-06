@@ -32,6 +32,7 @@ func result(failing bool) *sim.Result {
 		LogFiles:    []sim.File{{Name: "00000000000000000000.seg", Data: []byte("OTLOG001")}},
 		Receiver:    []byte("{}\n"),
 		Transitions: []byte("{}\n"),
+		Evals:       []byte("{\"t\":1}\n"),
 		Checks:      []sim.Check{{Name: sim.InvEpochLeader}, {Name: sim.InvTail}},
 	}
 	if failing {
@@ -54,6 +55,7 @@ func TestReportWritesTheFilesAndTheVerdict(t *testing.T) {
 		"registry.log":                      "t=0 node=serve kind=sim.start h=00\n",
 		"receiver.jsonl":                    "{}\n",
 		"transitions.jsonl":                 "{}\n",
+		"evals.jsonl":                       "{\"t\":1}\n",
 		"data/log/00000000000000000000.seg": "OTLOG001",
 	} {
 		got, err := os.ReadFile(filepath.Join(dir, name))
