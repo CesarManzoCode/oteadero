@@ -17,6 +17,17 @@ make refs       # descarga Prometheus 3.16.0 y VictoriaMetrics v1.155.0 fijados 
 make criteria   # todos los criterios mecánicos; 77 = omitido por falta de binario
 ```
 
+## Benchmark
+
+`python3 scripts/crit_bench.py` compila los binarios y mide el throughput del motor según D14 y D18; `python3 scripts/crit_bench_rss.py` lee el pico de memoria residente de esa misma corrida.
+
+- Generador: `otgen --profile bench --duration-s 60` (100 000 series, lotes de 10 000 líneas, 8 conexiones) con `taskset -c 4,5,10,11`. Antes, el script mide la tasa del generador solo con `--sink null` en los mismos núcleos.
+- Motor: `oteadero serve` con `taskset -c 0-3,6-9` (8 CPUs lógicas), `idle_grace_ms` 0 y cuota de 100 000 000 eventos/s. Throughput = eventos confirmados (tras fsync) / duración de la fase sostenida del reporte de `otgen`; pasa con al menos 1 000 000 eventos/s. La memoria es `VmHWM` de `/proc/<pid>/status` al terminar la carga; pasa con 4096 MiB o menos.
+- VictoriaMetrics: v1.155.0 (`victoria-metrics-prod`, de `make refs` o del `PATH`) en los mismos núcleos, con la misma carga enviada por `otgen --vm` a `/api/v1/import/prometheus`. Sin ese binario el script imprime solo el resultado del motor y sale con 77.
+- El script imprime la CPU (`/proc/cpuinfo`), la versión de `oteadero version`, la de `go version` y la del kernel. La conclusión permitida es la de D18: comparable, no equivalente.
+
+Requisitos: Go 1.27, Python 3.14, `taskset` y una máquina con al menos 12 CPUs lógicas. Las cifras se publican en Resultados al cerrar K3, con la salida medida.
+
 ## Estado
 
 | Fase | Contenido | Estado |

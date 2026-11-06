@@ -135,11 +135,15 @@ def rfc3339(ms):
 
 
 class VictoriaMetrics:
-    """victoria-metrics-prod on a free port with its storage under work."""
+    """victoria-metrics-prod on a free port with its storage under work.
 
-    def __init__(self, binary, work):
+    cpus, if given, pins it with taskset -c.
+    """
+
+    def __init__(self, binary, work, cpus=None):
         self.binary = binary
         self.work = work
+        self.cpus = cpus
         self.port = lib.free_port()
         self.url = f"http://127.0.0.1:{self.port}"
         self.proc = None
@@ -155,14 +159,17 @@ class VictoriaMetrics:
     def start(self):
         with open(self.work / "victoria-metrics.out", "wb") as out:
             self.proc = subprocess.Popen(
-                [
-                    self.binary,
-                    f"-storageDataPath={self.work / 'vm-data'}",
-                    f"-httpListenAddr=127.0.0.1:{self.port}",
-                    "-retentionPeriod=100y",
-                    "-search.disableCache",
-                    "-search.latencyOffset=0s",
-                ],
+                lib.pinned(
+                    self.cpus,
+                    [
+                        self.binary,
+                        f"-storageDataPath={self.work / 'vm-data'}",
+                        f"-httpListenAddr=127.0.0.1:{self.port}",
+                        "-retentionPeriod=100y",
+                        "-search.disableCache",
+                        "-search.latencyOffset=0s",
+                    ],
+                ),
                 stdout=out,
                 stderr=subprocess.STDOUT,
             )

@@ -129,6 +129,14 @@ def alerts_tenants():
     ]
 
 
+def pinned(cpus, command):
+    """Return command run under taskset -c cpus, or command itself without cpus.
+
+    taskset execs the command, so the pid of the process is the command's.
+    """
+    return ["taskset", "-c", cpus, *command] if cpus else command
+
+
 def _start_listening(command, output):
     """Start a process that prints `listening` when ready; return it and its output so far."""
     with open(output, "wb") as out:
@@ -151,10 +159,12 @@ class Serve:
 
     Synthetic timestamps are far behind the clock, so idle_grace_ms defaults to
     0: a tick would close every bucket. Restarting after kill keeps the port.
+    cpus, if given, pins it with taskset -c.
     """
 
-    def __init__(self, work, tenant_config, **settings):
+    def __init__(self, work, tenant_config, cpus=None, **settings):
         self.work = work
+        self.cpus = cpus
         self.port = free_port()
         self.url = f"http://127.0.0.1:{self.port}"
         self.data_dir = work / "data"
@@ -186,14 +196,17 @@ class Serve:
         self.starts += 1
         output = self.work / f"serve-{self.starts}.out"
         self.proc, text = _start_listening(
-            [
-                binary("oteadero"),
-                "serve",
-                "--config",
-                self.config_path,
-                "--export",
-                self.export_dir,
-            ],
+            pinned(
+                self.cpus,
+                [
+                    binary("oteadero"),
+                    "serve",
+                    "--config",
+                    self.config_path,
+                    "--export",
+                    self.export_dir,
+                ],
+            ),
             output,
         )
         next_offset, truncated = _RECOVERED.search(text).groups()
@@ -326,7 +339,9 @@ class Evaluator:
             raise RuntimeError(f"evaluator {self.id} exited with {code}")
 
 
-def start_otgen(profile, seed, url, report, duration_s=None, realtime=False, vm=False):
+def start_otgen(
+    profile, seed, url, report, duration_s=None, realtime=False, vm=False, cpus=None, sink=None
+):
     command = [
         binary("otgen"),
         "--profile",
@@ -344,7 +359,9 @@ def start_otgen(profile, seed, url, report, duration_s=None, realtime=False, vm=
         command.append("--realtime")
     if vm:
         command.append("--vm")
-    return subprocess.Popen(command)
+    if sink:
+        command += ["--sink", sink]
+    return subprocess.Popen(pinned(cpus, command))
 
 
 def wait_otgen(proc, report):
@@ -355,8 +372,10 @@ def wait_otgen(proc, report):
     return json.loads(Path(report).read_text())
 
 
-def run_otgen(profile, seed, url, report, duration_s=None, vm=False):
-    return wait_otgen(start_otgen(profile, seed, url, report, duration_s, vm=vm), report)
+def run_otgen(profile, seed, url, report, duration_s=None, vm=False, cpus=None, sink=None):
+    return wait_otgen(
+        start_otgen(profile, seed, url, report, duration_s, vm=vm, cpus=cpus, sink=sink), report
+    )
 
 
 def accepted_events(report):
